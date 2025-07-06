@@ -88,7 +88,7 @@ def create_training_function(mnist_dir_path: str) -> Callable:
             x = F.relu(self.fc1(x))
             x = F.dropout(x, training=self.training)
             x = self.fc2(x)
-            return F.log_softmax(x)
+            return F.log_softmax(x, dim=1)
 
     def train_fn(learning_rate: float) -> Any:
         import torch
