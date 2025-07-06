@@ -30,7 +30,6 @@ import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.{BigIntVector, Float8Vector}
 import org.apache.arrow.vector.ipc.ArrowStreamReader
 import org.mockito.Mockito.when
-import org.scalatest.Tag
 import org.scalatest.concurrent.Eventually
 import org.scalatest.time.SpanSugar.convertIntToGrainOfTime
 import org.scalatestplus.mockito.MockitoSugar
@@ -48,7 +47,7 @@ import org.apache.spark.sql.connect.dsl.MockRemoteSession
 import org.apache.spark.sql.connect.dsl.expressions._
 import org.apache.spark.sql.connect.dsl.plans._
 import org.apache.spark.sql.connect.plugin.SparkConnectPluginRegistry
-import org.apache.spark.sql.connect.service.{ExecuteHolder, ExecuteStatus, SessionStatus, SparkConnectAnalyzeHandler, SparkConnectService, SparkListenerConnectOperationStarted}
+import org.apache.spark.sql.connect.service.{ExecuteHolder, ExecuteKey, ExecuteStatus, SessionStatus, SparkConnectAnalyzeHandler, SparkConnectService, SparkListenerConnectOperationStarted}
 import org.apache.spark.sql.connector.catalog.InMemoryPartitionTableCatalog
 import org.apache.spark.sql.streaming.StreamingQuery
 import org.apache.spark.sql.test.SharedSparkSession
@@ -688,6 +687,42 @@ class SparkConnectServiceSuite
     }
   }
 
+  test("SPARK-51818: AnalyzePlanRequest does not execute the command") {
+    withTable("test") {
+      spark.sql("""
+                  | CREATE TABLE test (col1 INT, col2 STRING)
+                  |""".stripMargin)
+      val sqlString = "DROP TABLE test"
+      val plan = proto.Plan
+        .newBuilder()
+        .setRoot(
+          proto.Relation
+            .newBuilder()
+            .setCommon(proto.RelationCommon.newBuilder().setPlanId(1))
+            .setSql(proto.SQL.newBuilder().setQuery(sqlString).build())
+            .build())
+        .build()
+
+      val handler = new SparkConnectAnalyzeHandler(null)
+
+      val request = proto.AnalyzePlanRequest
+        .newBuilder()
+        .setExplain(
+          proto.AnalyzePlanRequest.Explain
+            .newBuilder()
+            .setPlan(plan)
+            .setExplainMode(proto.AnalyzePlanRequest.Explain.ExplainMode.EXPLAIN_MODE_EXTENDED)
+            .build())
+        .build()
+
+      handler.process(request, sparkSessionHolder)
+
+      // assert that table was not dropped
+      val tableExists = spark.catalog.tableExists("test")
+      assert(tableExists, "Table test should still exist after analyze request of DROP TABLE")
+    }
+  }
+
   test("Test explain mode in analyze response") {
     withTable("test") {
       spark.sql("""
@@ -861,13 +896,6 @@ class SparkConnectServiceSuite
     }
   }
 
-  protected def gridTest[A](testNamePrefix: String, testTags: Tag*)(params: Seq[A])(
-      testFun: A => Unit): Unit = {
-    for (param <- params) {
-      test(testNamePrefix + s" ($param)", testTags: _*)(testFun(param))
-    }
-  }
-
   class VerifyEvents(val sparkContext: SparkContext) {
     val listener: MockSparkListener = new MockSparkListener()
     val listenerBus = sparkContext.listenerBus
@@ -919,14 +947,17 @@ class SparkConnectServiceSuite
   }
   class MockSparkListener() extends SparkListener {
     val semaphoreStarted = new Semaphore(0)
-    var executeHolder = Option.empty[ExecuteHolder]
+    // Accessed by multiple threads in parallel.
+    @volatile var executeHolder = Option.empty[ExecuteHolder]
     override def onOtherEvent(event: SparkListenerEvent): Unit = {
       event match {
         case e: SparkListenerConnectOperationStarted =>
           semaphoreStarted.release()
           val sessionHolder =
             SparkConnectService.getOrCreateIsolatedSession(e.userId, e.sessionId, None)
-          executeHolder = sessionHolder.executeHolder(e.operationId)
+          val executeKey =
+            ExecuteKey(sessionHolder.userId, sessionHolder.sessionId, e.operationId)
+          executeHolder = SparkConnectService.executionManager.getExecuteHolder(executeKey)
         case _ =>
       }
     }

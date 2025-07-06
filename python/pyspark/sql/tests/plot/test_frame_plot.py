@@ -18,11 +18,21 @@
 import unittest
 from pyspark.errors import PySparkValueError
 from pyspark.sql import Row
-from pyspark.sql.plot import PySparkSampledPlotBase, PySparkTopNPlotBase
-from pyspark.testing.sqlutils import ReusedSQLTestCase, have_plotly, plotly_requirement_message
+from pyspark.testing.sqlutils import ReusedSQLTestCase
+from pyspark.testing.utils import (
+    have_plotly,
+    plotly_requirement_message,
+    have_pandas,
+    pandas_requirement_message,
+)
+
+if have_plotly and have_pandas:
+    from pyspark.sql.plot import PySparkSampledPlotBase, PySparkTopNPlotBase
 
 
-@unittest.skipIf(not have_plotly, plotly_requirement_message)
+@unittest.skipIf(
+    not have_plotly or not have_pandas, plotly_requirement_message or pandas_requirement_message
+)
 class DataFramePlotTestsMixin:
     def test_backend(self):
         accessor = self.spark.range(2).plot
@@ -38,24 +48,33 @@ class DataFramePlotTestsMixin:
             messageParameters={"backend": "matplotlib", "supported_backends": "plotly"},
         )
 
+    def test_unsupported_plot_kind(self):
+        from pyspark.sql.plot.core import PySparkPlotAccessor
+
+        data = [Row(a=i, b=i + 1, c=i + 2, d=i + 3) for i in range(2000)]
+        sdf = self.spark.createDataFrame(data)
+        with self.assertRaises(PySparkValueError) as pe:
+            sdf.plot(kind="bubble")
+
+        self.check_error(
+            exception=pe.exception,
+            errorClass="UNSUPPORTED_PLOT_KIND",
+            messageParameters={
+                "plot_type": "bubble",
+                "supported_plot_types": ", ".join(
+                    sorted(
+                        list(PySparkPlotAccessor.plot_data_map.keys())
+                        + ["pie", "box", "kde", "density", "hist"]
+                    )
+                ),
+            },
+        )
+
     def test_topn_max_rows(self):
-        try:
-            self.spark.conf.set("spark.sql.pyspark.plotting.max_rows", "1000")
+        with self.sql_conf({"spark.sql.pyspark.plotting.max_rows": "1000"}):
             sdf = self.spark.range(2500)
             pdf = PySparkTopNPlotBase().get_top_n(sdf)
             self.assertEqual(len(pdf), 1000)
-        finally:
-            self.spark.conf.unset("spark.sql.pyspark.plotting.max_rows")
-
-    def test_sampled_plot_with_ratio(self):
-        try:
-            self.spark.conf.set("spark.sql.pyspark.plotting.sample_ratio", "0.5")
-            data = [Row(a=i, b=i + 1, c=i + 2, d=i + 3) for i in range(2500)]
-            sdf = self.spark.createDataFrame(data)
-            pdf = PySparkSampledPlotBase().get_sampled(sdf)
-            self.assertEqual(round(len(pdf) / 2500, 1), 0.5)
-        finally:
-            self.spark.conf.unset("spark.sql.pyspark.plotting.sample_ratio")
 
     def test_sampled_plot_with_max_rows(self):
         data = [Row(a=i, b=i + 1, c=i + 2, d=i + 3) for i in range(2000)]

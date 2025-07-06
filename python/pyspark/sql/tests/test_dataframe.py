@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+import glob
+import os
 import pydoc
 import shutil
 import tempfile
@@ -24,7 +26,18 @@ import io
 from contextlib import redirect_stdout
 
 from pyspark.sql import Row, functions, DataFrame
-from pyspark.sql.functions import col, lit, count, struct
+from pyspark.sql.functions import (
+    col,
+    lit,
+    count,
+    struct,
+    date_format,
+    to_date,
+    array,
+    explode,
+    when,
+    concat,
+)
 from pyspark.sql.types import (
     StringType,
     IntegerType,
@@ -42,6 +55,7 @@ from pyspark.errors import (
 from pyspark.testing import assertDataFrameEqual
 from pyspark.testing.sqlutils import (
     ReusedSQLTestCase,
+    SPARK_HOME,
     have_pyarrow,
     have_pandas,
     pandas_requirement_message,
@@ -145,6 +159,15 @@ class DataFrameTestsMixin:
         self.assertTrue(df3.columns, ["id", "value", "id", "value"])
         self.assertTrue(df3.count() == 20)
 
+    def test_lateral_column_alias(self):
+        df1 = self.spark.range(10).select(
+            (col("id") + lit(1)).alias("x"), (col("x") + lit(1)).alias("y")
+        )
+        df2 = self.spark.range(10).select(col("id").alias("x"))
+        df3 = df1.join(df2, df1.x == df2.x).select(df1.y)
+        self.assertTrue(df3.columns, ["y"])
+        self.assertTrue(df3.count() == 9)
+
     def test_duplicated_column_names(self):
         df = self.spark.createDataFrame([(1, 2)], ["c", "c"])
         row = df.select("*").first()
@@ -176,6 +199,26 @@ class DataFrameTestsMixin:
         self.assertEqual(df.drop(col("name")).columns, ["age", "active"])
         self.assertEqual(df.drop(col("name"), col("age")).columns, ["active"])
         self.assertEqual(df.drop(col("name"), col("age"), col("random")).columns, ["active"])
+
+    def test_drop_notexistent_col(self):
+        df1 = self.spark.createDataFrame(
+            [("a", "b", "c")],
+            schema="colA string, colB string, colC string",
+        )
+        df2 = self.spark.createDataFrame(
+            [("c", "d", "e")],
+            schema="colC string, colD string, colE string",
+        )
+        df3 = df1.join(df2, df1["colC"] == df2["colC"]).withColumn(
+            "colB",
+            when(df1["colB"] == "b", concat(df1["colB"].cast("string"), lit("x"))).otherwise(
+                df1["colB"]
+            ),
+        )
+        df4 = df3.drop(df1["colB"])
+
+        self.assertEqual(df4.columns, ["colA", "colB", "colC", "colC", "colD", "colE"])
+        self.assertEqual(df4.count(), 1)
 
     def test_drop_join(self):
         left_df = self.spark.createDataFrame(
@@ -506,14 +549,16 @@ class DataFrameTestsMixin:
 
         # number of fields must match.
         self.assertRaisesRegex(
-            Exception, "FIELD_STRUCT_LENGTH_MISMATCH", lambda: rdd.toDF("key: int").collect()
+            Exception,
+            "FIELD_STRUCT_LENGTH_MISMATCH",
+            lambda: rdd.coalesce(1).toDF("key: int").collect(),
         )
 
         # field types mismatch will cause exception at runtime.
         self.assertRaisesRegex(
             Exception,
             "FIELD_DATA_TYPE_UNACCEPTABLE",
-            lambda: rdd.toDF("key: float, value: string").collect(),
+            lambda: rdd.coalesce(1).toDF("key: float, value: string").collect(),
         )
 
         # flat schema values will be wrapped into row.
@@ -671,8 +716,7 @@ class DataFrameTestsMixin:
                     |+---+-----+
                     ||  1|    1|
                     |+---+-----+
-                    |only showing top 1 row
-                    |"""
+                    |only showing top 1 row"""
                     self.assertEqual(re.sub(pattern, "", expected3), df.__repr__())
 
         # test when eager evaluation is enabled and _repr_html_ will be called
@@ -778,6 +822,16 @@ class DataFrameTestsMixin:
         )
 
     def test_df_merge_into(self):
+        filename_pattern = (
+            "sql/catalyst/target/scala-*/test-classes/org/apache/spark/sql/connector/catalog/"
+            "InMemoryRowLevelOperationTableCatalog.class"
+        )
+        if not bool(glob.glob(os.path.join(SPARK_HOME, filename_pattern))):
+            raise unittest.SkipTest(
+                "org.apache.spark.sql.connector.catalog.InMemoryRowLevelOperationTableCatalog' "
+                "is not available. Will skip the related tests"
+            )
+
         try:
             # InMemoryRowLevelOperationTableCatalog is a test catalog that is included in the
             # catalyst-test package. If Spark complains that it can't find this class, make sure
@@ -951,10 +1005,16 @@ class DataFrameTestsMixin:
     def test_isinstance_dataframe(self):
         self.assertIsInstance(self.spark.range(1), DataFrame)
 
-    def test_checkpoint_dataframe(self):
+    def test_local_checkpoint_dataframe(self):
         with io.StringIO() as buf, redirect_stdout(buf):
             self.spark.range(1).localCheckpoint().explain()
             self.assertIn("ExistingRDD", buf.getvalue())
+
+    def test_local_checkpoint_dataframe_with_storage_level(self):
+        # We don't have a way to reach into the server and assert the storage level server side, but
+        # this test should cover for unexpected errors in the API.
+        df = self.spark.range(10).localCheckpoint(eager=True, storageLevel=StorageLevel.DISK_ONLY)
+        df.collect()
 
     def test_transpose(self):
         df = self.spark.createDataFrame([{"a": "x", "b": "y", "c": "z"}])
@@ -1021,7 +1081,65 @@ class DataFrameTestsMixin:
         self.check_error(
             exception=pe.exception,
             errorClass="TRANSPOSE_NO_LEAST_COMMON_TYPE",
-            messageParameters={"dt1": "STRING", "dt2": "BIGINT"},
+            messageParameters={"dt1": '"STRING"', "dt2": '"BIGINT"'},
+        )
+
+    def test_transpose_with_invalid_index_columns(self):
+        # SPARK-50602: invalid index columns
+        df = self.spark.createDataFrame([{"a": "x", "b": "y", "c": "z"}])
+
+        with self.assertRaises(AnalysisException) as pe:
+            df.transpose(col("a") + 1).collect()
+        self.check_error(
+            exception=pe.exception,
+            errorClass="TRANSPOSE_INVALID_INDEX_COLUMN",
+            messageParameters={"reason": "Index column must be an atomic attribute"},
+        )
+
+    def test_metadata_column(self):
+        with self.sql_conf(
+            {"spark.sql.catalog.testcat": "org.apache.spark.sql.connector.catalog.InMemoryCatalog"}
+        ):
+            tbl = "testcat.t"
+            with self.table(tbl):
+                self.spark.sql(
+                    f"""
+                    CREATE TABLE {tbl} (index bigint, data string)
+                    PARTITIONED BY (bucket(4, index), index)
+                    """
+                )
+                self.spark.sql(f"""INSERT INTO {tbl} VALUES (1, 'a'), (2, 'b'), (3, 'c')""")
+
+                df = self.spark.sql(f"""SELECT * FROM {tbl}""")
+                assertDataFrameEqual(
+                    df.select(df.metadataColumn("index")),
+                    [Row(0), Row(0), Row(0)],
+                )
+
+    def test_with_column_and_generator(self):
+        # SPARK-51451: Generators should be available with withColumn
+        df = self.spark.createDataFrame([("082017",)], ["dt"]).select(
+            to_date(col("dt"), "MMyyyy").alias("dt")
+        )
+        df_dt = df.withColumn("dt", date_format(col("dt"), "MM/dd/yyyy"))
+        monthArray = [lit(x) for x in range(0, 12)]
+        df_month_y = df_dt.withColumn("month_y", explode(array(monthArray)))
+
+        assertDataFrameEqual(
+            df_month_y,
+            [Row(dt="08/01/2017", month_y=i) for i in range(12)],
+        )
+
+        df_dt_month_y = df.withColumns(
+            {
+                "dt": date_format(col("dt"), "MM/dd/yyyy"),
+                "month_y": explode(array(monthArray)),
+            }
+        )
+
+        assertDataFrameEqual(
+            df_dt_month_y,
+            [Row(dt="08/01/2017", month_y=i) for i in range(12)],
         )
 
 

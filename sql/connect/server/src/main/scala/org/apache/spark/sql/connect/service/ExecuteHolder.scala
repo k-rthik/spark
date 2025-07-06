@@ -17,8 +17,12 @@
 
 package org.apache.spark.sql.connect.service
 
+import java.util.concurrent.atomic.AtomicBoolean
+
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
+
+import com.google.protobuf.GeneratedMessage
 
 import org.apache.spark.SparkEnv
 import org.apache.spark.connect.proto
@@ -79,20 +83,24 @@ private[connect] class ExecuteHolder(
 
   val observations: mutable.Map[String, Observation] = mutable.Map.empty
 
+  lazy val allObservationAndPlanIds: Map[String, Long] = {
+    ExecuteHolder.collectAllObservationAndPlanIds(request.getPlan).toMap
+  }
+
   private val runner: ExecuteThreadRunner = new ExecuteThreadRunner(this)
 
-  /** System.currentTimeMillis when this ExecuteHolder was created. */
-  val creationTimeMs = System.currentTimeMillis()
+  /** System.nanoTime when this ExecuteHolder was created. */
+  val creationTimeNs = System.nanoTime()
 
   /**
    * None if there is currently an attached RPC (grpcResponseSenders not empty or during initial
-   * ExecutePlan handler). Otherwise, the System.currentTimeMillis when the last RPC detached
+   * ExecutePlan handler). Otherwise, the System.nanoTime when the last RPC detached
    * (grpcResponseSenders became empty).
    */
-  @volatile var lastAttachedRpcTimeMs: Option[Long] = None
+  @volatile var lastAttachedRpcTimeNs: Option[Long] = None
 
-  /** System.currentTimeMillis when this ExecuteHolder was closed. */
-  private var closedTimeMs: Option[Long] = None
+  /** System.nanoTime when this ExecuteHolder was closed. */
+  private var closedTimeNs: Option[Long] = None
 
   /**
    * Attached ExecuteGrpcResponseSenders that send the GRPC responses.
@@ -104,8 +112,8 @@ private[connect] class ExecuteHolder(
       : mutable.ArrayBuffer[ExecuteGrpcResponseSender[proto.ExecutePlanResponse]] =
     new mutable.ArrayBuffer[ExecuteGrpcResponseSender[proto.ExecutePlanResponse]]()
 
-  /** For testing. Whether the async completion callback is called. */
-  @volatile private[connect] var completionCallbackCalled: Boolean = false
+  /** Indicates whether the cleanup method was called. */
+  private[connect] val completionCallbackCalled: AtomicBoolean = new AtomicBoolean(false)
 
   /**
    * Start the execution. The execution is started in a background thread in ExecuteThreadRunner.
@@ -116,6 +124,16 @@ private[connect] class ExecuteHolder(
    */
   def start(): Unit = {
     runner.start()
+  }
+
+  /**
+   * Check if the execution was ended without finalizing the outcome and no further progress will
+   * be made. If the execution was delegated, this method always returns false.
+   */
+  def isOrphan(): Boolean = {
+    !runner.isAlive() &&
+    !runner.shouldDelegateCompleteResponse(request) &&
+    !responseObserver.completed()
   }
 
   def addObservation(name: String, observation: Observation): Unit = synchronized {
@@ -153,13 +171,13 @@ private[connect] class ExecuteHolder(
 
   private def addGrpcResponseSender(
       sender: ExecuteGrpcResponseSender[proto.ExecutePlanResponse]) = synchronized {
-    if (closedTimeMs.isEmpty) {
+    if (closedTimeNs.isEmpty) {
       // Interrupt all other senders - there can be only one active sender.
       // Interrupted senders will remove themselves with removeGrpcResponseSender when they exit.
       grpcResponseSenders.foreach(_.interrupt())
       // And add this one.
       grpcResponseSenders += sender
-      lastAttachedRpcTimeMs = None
+      lastAttachedRpcTimeNs = None
     } else {
       // execution is closing... interrupt it already.
       sender.interrupt()
@@ -168,23 +186,33 @@ private[connect] class ExecuteHolder(
 
   def removeGrpcResponseSender(sender: ExecuteGrpcResponseSender[_]): Unit = synchronized {
     // if closed, we are shutting down and interrupting all senders already
-    if (closedTimeMs.isEmpty) {
+    if (closedTimeNs.isEmpty) {
       grpcResponseSenders -=
         sender.asInstanceOf[ExecuteGrpcResponseSender[proto.ExecutePlanResponse]]
       if (grpcResponseSenders.isEmpty) {
-        lastAttachedRpcTimeMs = Some(System.currentTimeMillis())
+        lastAttachedRpcTimeNs = Some(System.nanoTime())
       }
     }
   }
 
   // For testing.
-  private[connect] def setGrpcResponseSendersDeadline(deadlineMs: Long) = synchronized {
-    grpcResponseSenders.foreach(_.setDeadline(deadlineMs))
+  private[connect] def setGrpcResponseSendersDeadline(deadlineNs: Long) = synchronized {
+    grpcResponseSenders.foreach(_.setDeadline(deadlineNs))
   }
 
   // For testing
   private[connect] def interruptGrpcResponseSenders() = synchronized {
     grpcResponseSenders.foreach(_.interrupt())
+  }
+
+  // For testing
+  private[connect] def undoResponseObserverCompletion() = synchronized {
+    responseObserver.undoCompletion()
+  }
+
+  // For testing
+  private[connect] def isExecuteThreadRunnerAlive() = {
+    runner.isAlive()
   }
 
   /**
@@ -193,9 +221,9 @@ private[connect] class ExecuteHolder(
    * don't get garbage collected. End this grace period when the initial ExecutePlan ends.
    */
   def afterInitialRPC(): Unit = synchronized {
-    if (closedTimeMs.isEmpty) {
+    if (closedTimeNs.isEmpty) {
       if (grpcResponseSenders.isEmpty) {
-        lastAttachedRpcTimeMs = Some(System.currentTimeMillis())
+        lastAttachedRpcTimeNs = Some(System.nanoTime())
       }
     }
   }
@@ -225,28 +253,33 @@ private[connect] class ExecuteHolder(
    * execution from global tracking and from its session.
    */
   def close(): Unit = synchronized {
-    if (closedTimeMs.isEmpty) {
+    if (closedTimeNs.isEmpty) {
       // interrupt execution, if still running.
-      runner.interrupt()
-      // Do not wait for the execution to finish, clean up resources immediately.
-      runner.processOnCompletion { _ =>
-        completionCallbackCalled = true
-        // The execution may not immediately get interrupted, clean up any remaining resources when
-        // it does.
-        responseObserver.removeAll()
-        // post closed to UI
-        eventsManager.postClosed()
-      }
+      val interrupted = runner.interrupt()
       // interrupt any attached grpcResponseSenders
       grpcResponseSenders.foreach(_.interrupt())
       // if there were still any grpcResponseSenders, register detach time
       if (grpcResponseSenders.nonEmpty) {
-        lastAttachedRpcTimeMs = Some(System.currentTimeMillis())
+        lastAttachedRpcTimeNs = Some(System.nanoTime())
         grpcResponseSenders.clear()
       }
-      // remove all cached responses from observer
+      if (!interrupted) {
+        cleanup()
+      }
+      closedTimeNs = Some(System.nanoTime())
+    }
+  }
+
+  /**
+   * A piece of code that is called only once when this execute holder is closed or the
+   * interrupted execution thread is terminated.
+   */
+  private[connect] def cleanup(): Unit = {
+    if (completionCallbackCalled.compareAndSet(false, true)) {
+      // Remove all cached responses from the observer.
       responseObserver.removeAll()
-      closedTimeMs = Some(System.currentTimeMillis())
+      // Post "closed" to UI.
+      eventsManager.postClosed()
     }
   }
 
@@ -270,9 +303,9 @@ private[connect] class ExecuteHolder(
       sparkSessionTags = sparkSessionTags,
       reattachable = reattachable,
       status = eventsManager.status,
-      creationTimeMs = creationTimeMs,
-      lastAttachedRpcTimeMs = lastAttachedRpcTimeMs,
-      closedTimeMs = closedTimeMs)
+      creationTimeNs = creationTimeNs,
+      lastAttachedRpcTimeNs = lastAttachedRpcTimeNs,
+      closedTimeNs = closedTimeNs)
   }
 
   /** Get key used by SparkConnectExecutionManager global tracker. */
@@ -280,6 +313,26 @@ private[connect] class ExecuteHolder(
 
   /** Get the operation ID. */
   def operationId: String = key.operationId
+}
+
+private object ExecuteHolder {
+  private def collectAllObservationAndPlanIds(
+      planOrMessage: GeneratedMessage,
+      collected: mutable.Map[String, Long] = mutable.Map.empty): mutable.Map[String, Long] = {
+    planOrMessage match {
+      case relation: proto.Relation if relation.hasCollectMetrics =>
+        collected += relation.getCollectMetrics.getName -> relation.getCommon.getPlanId
+        collectAllObservationAndPlanIds(relation.getCollectMetrics.getInput, collected)
+      case _ =>
+        planOrMessage.getAllFields.values().asScala.foreach {
+          case message: GeneratedMessage =>
+            collectAllObservationAndPlanIds(message, collected)
+          case _ =>
+          // not a message (probably a primitive type), do nothing
+        }
+    }
+    collected
+  }
 }
 
 /** Used to identify ExecuteHolder jobTag among SparkContext.SPARK_JOB_TAGS. */
@@ -325,9 +378,9 @@ case class ExecuteInfo(
     sparkSessionTags: Set[String],
     reattachable: Boolean,
     status: ExecuteStatus,
-    creationTimeMs: Long,
-    lastAttachedRpcTimeMs: Option[Long],
-    closedTimeMs: Option[Long]) {
+    creationTimeNs: Long,
+    lastAttachedRpcTimeNs: Option[Long],
+    closedTimeNs: Option[Long]) {
 
   def key: ExecuteKey = ExecuteKey(userId, sessionId, operationId)
 }

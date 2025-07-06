@@ -75,6 +75,7 @@ import org.apache.spark.internal.SparkLogger;
 import org.apache.spark.internal.SparkLoggerFactory;
 import org.apache.spark.internal.LogKeys;
 import org.apache.spark.internal.MDC;
+import org.apache.spark.util.Utils;
 
 import static org.apache.hadoop.hive.conf.SystemVariables.ENV_PREFIX;
 import static org.apache.hadoop.hive.conf.SystemVariables.HIVECONF_PREFIX;
@@ -304,7 +305,7 @@ public class HiveSessionImpl implements HiveSession {
     if (!operationLogRootDir.exists()) {
       LOG.warn("The operation log root directory is removed, recreating: {}",
         MDC.of(LogKeys.PATH$.MODULE$, operationLogRootDir.getAbsolutePath()));
-      if (!operationLogRootDir.mkdirs()) {
+      if (!Utils.createDirectory(operationLogRootDir)) {
         LOG.warn("Unable to create operation log root directory: {}",
           MDC.of(LogKeys.PATH$.MODULE$, operationLogRootDir.getAbsolutePath()));
       }
@@ -673,15 +674,23 @@ public class HiveSessionImpl implements HiveSession {
         hiveHist.closeStream();
       }
       try {
+        // Forcibly initialize thread local Hive so that
+        // SessionState#unCacheDataNucleusClassLoaders won't trigger
+        // Hive built-in UDFs initialization.
+        Hive.getWithoutRegisterFns(sessionState.getConf());
         sessionState.close();
       } finally {
         sessionState = null;
       }
-    } catch (IOException ioe) {
+    } catch (IOException | HiveException ioe) {
       throw new HiveSQLException("Failure to close", ioe);
     } finally {
       if (sessionState != null) {
         try {
+          // Forcibly initialize thread local Hive so that
+          // SessionState#unCacheDataNucleusClassLoaders won't trigger
+          // Hive built-in UDFs initialization.
+          Hive.getWithoutRegisterFns(sessionState.getConf());
           sessionState.close();
         } catch (Throwable t) {
           LOG.warn("Error closing session", t);

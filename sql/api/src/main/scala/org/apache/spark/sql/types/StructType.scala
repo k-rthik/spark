@@ -321,7 +321,7 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
    *
    * If includeCollections is true, this will return fields that are nested in maps and arrays.
    */
-  private[sql] def findNestedField(
+  private[spark] def findNestedField(
       fieldNames: Seq[String],
       includeCollections: Boolean = false,
       resolver: SqlApiAnalysis.Resolver = _ == _,
@@ -502,6 +502,18 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
   override private[spark] def existsRecursively(f: (DataType) => Boolean): Boolean = {
     f(this) || fields.exists(field => field.dataType.existsRecursively(f))
   }
+
+  override private[spark] def transformRecursively(
+      f: PartialFunction[DataType, DataType]): DataType = {
+    if (f.isDefinedAt(this)) {
+      return f(this)
+    }
+
+    val newFields = fields.map { field =>
+      field.copy(dataType = field.dataType.transformRecursively(f))
+    }
+    StructType(newFields)
+  }
 }
 
 /**
@@ -509,6 +521,7 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
  */
 @Stable
 object StructType extends AbstractDataType {
+  private[sql] val SQL_FUNCTION_DEFAULT_METADATA_KEY = "default"
 
   override private[sql] def defaultConcreteType: DataType = new StructType
 

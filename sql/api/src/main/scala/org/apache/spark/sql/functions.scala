@@ -399,10 +399,7 @@ object functions {
    * @since 4.0.0
    */
   def count_min_sketch(e: Column, eps: Column, confidence: Column): Column =
-    count_min_sketch(e, eps, confidence, lit(SparkClassUtils.random.nextInt))
-
-  private[spark] def collect_top_k(e: Column, num: Int, reverse: Boolean): Column =
-    Column.internalFn("collect_top_k", e, lit(num), lit(reverse))
+    count_min_sketch(e, eps, confidence, lit(SparkClassUtils.random.nextLong))
 
   /**
    * Aggregate function: returns the Pearson Correlation Coefficient for two columns.
@@ -634,6 +631,7 @@ object functions {
    * @group agg_funcs
    * @since 2.0.0
    */
+  @scala.annotation.varargs
   def grouping_id(cols: Column*): Column = Column.fn("grouping_id", cols: _*)
 
   /**
@@ -649,6 +647,7 @@ object functions {
    * @group agg_funcs
    * @since 2.0.0
    */
+  @scala.annotation.varargs
   def grouping_id(colName: String, colNames: String*): Column = {
     grouping_id((Seq(colName) ++ colNames).map(n => Column(n)): _*)
   }
@@ -1149,6 +1148,77 @@ object functions {
    * @since 3.2.0
    */
   def sum_distinct(e: Column): Column = Column.fn("sum", isDistinct = true, e)
+
+  /**
+   * Aggregate function: returns the concatenation of non-null input values.
+   *
+   * @group agg_funcs
+   * @since 4.0.0
+   */
+  def listagg(e: Column): Column = Column.fn("listagg", e)
+
+  /**
+   * Aggregate function: returns the concatenation of non-null input values, separated by the
+   * delimiter.
+   *
+   * @group agg_funcs
+   * @since 4.0.0
+   */
+  def listagg(e: Column, delimiter: Column): Column = Column.fn("listagg", e, delimiter)
+
+  /**
+   * Aggregate function: returns the concatenation of distinct non-null input values.
+   *
+   * @group agg_funcs
+   * @since 4.0.0
+   */
+  def listagg_distinct(e: Column): Column = Column.fn("listagg", isDistinct = true, e)
+
+  /**
+   * Aggregate function: returns the concatenation of distinct non-null input values, separated by
+   * the delimiter.
+   *
+   * @group agg_funcs
+   * @since 4.0.0
+   */
+  def listagg_distinct(e: Column, delimiter: Column): Column =
+    Column.fn("listagg", isDistinct = true, e, delimiter)
+
+  /**
+   * Aggregate function: returns the concatenation of non-null input values. Alias for `listagg`.
+   *
+   * @group agg_funcs
+   * @since 4.0.0
+   */
+  def string_agg(e: Column): Column = Column.fn("string_agg", e)
+
+  /**
+   * Aggregate function: returns the concatenation of non-null input values, separated by the
+   * delimiter. Alias for `listagg`.
+   *
+   * @group agg_funcs
+   * @since 4.0.0
+   */
+  def string_agg(e: Column, delimiter: Column): Column = Column.fn("string_agg", e, delimiter)
+
+  /**
+   * Aggregate function: returns the concatenation of distinct non-null input values. Alias for
+   * `listagg`.
+   *
+   * @group agg_funcs
+   * @since 4.0.0
+   */
+  def string_agg_distinct(e: Column): Column = Column.fn("string_agg", isDistinct = true, e)
+
+  /**
+   * Aggregate function: returns the concatenation of distinct non-null input values, separated by
+   * the delimiter. Alias for `listagg`.
+   *
+   * @group agg_funcs
+   * @since 4.0.0
+   */
+  def string_agg_distinct(e: Column, delimiter: Column): Column =
+    Column.fn("string_agg", isDistinct = true, e, delimiter)
 
   /**
    * Aggregate function: alias for `var_samp`.
@@ -1674,6 +1744,7 @@ object functions {
    * @group struct_funcs
    * @since 3.5.0
    */
+  @scala.annotation.varargs
   def named_struct(cols: Column*): Column = Column.fn("named_struct", cols: _*)
 
   /**
@@ -1726,7 +1797,7 @@ object functions {
    * @group normal_funcs
    * @since 1.5.0
    */
-  def broadcast[DS[U] <: api.Dataset[U]](df: DS[_]): df.type = {
+  def broadcast[U](df: Dataset[U]): df.type = {
     df.hint("broadcast").asInstanceOf[df.type]
   }
 
@@ -1895,6 +1966,27 @@ object functions {
    * @since 1.4.0
    */
   def randn(): Column = randn(SparkClassUtils.random.nextLong)
+
+  /**
+   * Returns a string of the specified length whose characters are chosen uniformly at random from
+   * the following pool of characters: 0-9, a-z, A-Z. The string length must be a constant
+   * two-byte or four-byte integer (SMALLINT or INT, respectively).
+   *
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def randstr(length: Column): Column =
+    randstr(length, lit(SparkClassUtils.random.nextLong))
+
+  /**
+   * Returns a string of the specified length whose characters are chosen uniformly at random from
+   * the following pool of characters: 0-9, a-z, A-Z, with the chosen random seed. The string
+   * length must be a constant two-byte or four-byte integer (SMALLINT or INT, respectively).
+   *
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def randstr(length: Column, seed: Column): Column = Column.fn("randstr", length, seed)
 
   /**
    * Partition ID.
@@ -3695,6 +3787,7 @@ object functions {
    * @group misc_funcs
    * @since 3.5.0
    */
+  @scala.annotation.varargs
   def reflect(cols: Column*): Column = Column.fn("reflect", cols: _*)
 
   /**
@@ -3703,6 +3796,7 @@ object functions {
    * @group misc_funcs
    * @since 3.5.0
    */
+  @scala.annotation.varargs
   def java_method(cols: Column*): Column = Column.fn("java_method", cols: _*)
 
   /**
@@ -3712,6 +3806,7 @@ object functions {
    * @group misc_funcs
    * @since 4.0.0
    */
+  @scala.annotation.varargs
   def try_reflect(cols: Column*): Column = Column.fn("try_reflect", cols: _*)
 
   /**
@@ -3738,7 +3833,34 @@ object functions {
    * @group generator_funcs
    * @since 3.5.0
    */
+  @scala.annotation.varargs
   def stack(cols: Column*): Column = Column.fn("stack", cols: _*)
+
+  /**
+   * Returns a random value with independent and identically distributed (i.i.d.) values with the
+   * specified range of numbers. The provided numbers specifying the minimum and maximum values of
+   * the range must be constant. If both of these numbers are integers, then the result will also
+   * be an integer. Otherwise if one or both of these are floating-point numbers, then the result
+   * will also be a floating-point number.
+   *
+   * @group math_funcs
+   * @since 4.0.0
+   */
+  def uniform(min: Column, max: Column): Column =
+    uniform(min, max, lit(SparkClassUtils.random.nextLong))
+
+  /**
+   * Returns a random value with independent and identically distributed (i.i.d.) values with the
+   * specified range of numbers, with the chosen random seed. The provided numbers specifying the
+   * minimum and maximum values of the range must be constant. If both of these numbers are
+   * integers, then the result will also be an integer. Otherwise if one or both of these are
+   * floating-point numbers, then the result will also be a floating-point number.
+   *
+   * @group math_funcs
+   * @since 4.0.0
+   */
+  def uniform(min: Column, max: Column, seed: Column): Column =
+    Column.fn("uniform", min, max, seed)
 
   /**
    * Returns a random value with independent and identically distributed (i.i.d.) uniformly
@@ -3870,6 +3992,44 @@ object functions {
     Column.fn("encode", value, lit(charset))
 
   /**
+   * Returns true if the input is a valid UTF-8 string, otherwise returns false.
+   *
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def is_valid_utf8(str: Column): Column =
+    Column.fn("is_valid_utf8", str)
+
+  /**
+   * Returns a new string in which all invalid UTF-8 byte sequences, if any, are replaced by the
+   * Unicode replacement character (U+FFFD).
+   *
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def make_valid_utf8(str: Column): Column =
+    Column.fn("make_valid_utf8", str)
+
+  /**
+   * Returns the input value if it corresponds to a valid UTF-8 string, or emits a
+   * SparkIllegalArgumentException exception otherwise.
+   *
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def validate_utf8(str: Column): Column =
+    Column.fn("validate_utf8", str)
+
+  /**
+   * Returns the input value if it corresponds to a valid UTF-8 string, or NULL otherwise.
+   *
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def try_validate_utf8(str: Column): Column =
+    Column.fn("try_validate_utf8", str)
+
+  /**
    * Formats numeric column x to a format like '#,###,###.##', rounded to d decimal places with
    * HALF_EVEN round mode, and returns the result as a string column.
    *
@@ -3913,7 +4073,20 @@ object functions {
    * @group string_funcs
    * @since 1.5.0
    */
-  def instr(str: Column, substring: String): Column = Column.fn("instr", str, lit(substring))
+  def instr(str: Column, substring: String): Column = instr(str, lit(substring))
+
+  /**
+   * Locate the position of the first occurrence of substr column in the given string. Returns
+   * null if either of the arguments are null.
+   *
+   * @note
+   *   The position is not zero based, but 1 based index. Returns 0 if substr could not be found
+   *   in str.
+   *
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def instr(str: Column, substring: Column): Column = Column.fn("instr", str, substring)
 
   /**
    * Computes the character length of a given string or number of bytes of a binary string. The
@@ -3993,8 +4166,7 @@ object functions {
    * @group string_funcs
    * @since 1.5.0
    */
-  def lpad(str: Column, len: Int, pad: String): Column =
-    Column.fn("lpad", str, lit(len), lit(pad))
+  def lpad(str: Column, len: Int, pad: String): Column = lpad(str, lit(len), lit(pad))
 
   /**
    * Left-pad the binary column with pad to a byte length of len. If the binary column is longer
@@ -4003,8 +4175,16 @@ object functions {
    * @group string_funcs
    * @since 3.3.0
    */
-  def lpad(str: Column, len: Int, pad: Array[Byte]): Column =
-    Column.fn("lpad", str, lit(len), lit(pad))
+  def lpad(str: Column, len: Int, pad: Array[Byte]): Column = lpad(str, lit(len), lit(pad))
+
+  /**
+   * Left-pad the string column with pad to a length of len. If the string column is longer than
+   * len, the return value is shortened to len characters.
+   *
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def lpad(str: Column, len: Column, pad: Column): Column = Column.fn("lpad", str, len, pad)
 
   /**
    * Trim the spaces from left end for the specified string value.
@@ -4019,7 +4199,14 @@ object functions {
    * @group string_funcs
    * @since 2.3.0
    */
-  def ltrim(e: Column, trimString: String): Column = Column.fn("ltrim", lit(trimString), e)
+  def ltrim(e: Column, trimString: String): Column = ltrim(e, lit(trimString))
+
+  /**
+   * Trim the specified character string from left end for the specified string column.
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def ltrim(e: Column, trim: Column): Column = Column.fn("ltrim", trim, e)
 
   /**
    * Calculates the byte length for the specified string column.
@@ -4174,8 +4361,7 @@ object functions {
    * @group string_funcs
    * @since 1.5.0
    */
-  def rpad(str: Column, len: Int, pad: String): Column =
-    Column.fn("rpad", str, lit(len), lit(pad))
+  def rpad(str: Column, len: Int, pad: String): Column = rpad(str, lit(len), lit(pad))
 
   /**
    * Right-pad the binary column with pad to a byte length of len. If the binary column is longer
@@ -4184,8 +4370,16 @@ object functions {
    * @group string_funcs
    * @since 3.3.0
    */
-  def rpad(str: Column, len: Int, pad: Array[Byte]): Column =
-    Column.fn("rpad", str, lit(len), lit(pad))
+  def rpad(str: Column, len: Int, pad: Array[Byte]): Column = rpad(str, lit(len), lit(pad))
+
+  /**
+   * Right-pad the string column with pad to a length of len. If the string column is longer than
+   * len, the return value is shortened to len characters.
+   *
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def rpad(str: Column, len: Column, pad: Column): Column = Column.fn("rpad", str, len, pad)
 
   /**
    * Repeats a string column n times, and returns it as a new string column.
@@ -4216,7 +4410,14 @@ object functions {
    * @group string_funcs
    * @since 2.3.0
    */
-  def rtrim(e: Column, trimString: String): Column = Column.fn("rtrim", lit(trimString), e)
+  def rtrim(e: Column, trimString: String): Column = rtrim(e, lit(trimString))
+
+  /**
+   * Trim the specified character string from right end for the specified string column.
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def rtrim(e: Column, trim: Column): Column = Column.fn("rtrim", trim, e)
 
   /**
    * Returns the soundex code for the specified expression.
@@ -4402,7 +4603,14 @@ object functions {
    * @group string_funcs
    * @since 2.3.0
    */
-  def trim(e: Column, trimString: String): Column = Column.fn("trim", lit(trimString), e)
+  def trim(e: Column, trimString: String): Column = trim(e, lit(trimString))
+
+  /**
+   * Trim the specified character from both ends for the specified string column.
+   * @group string_funcs
+   * @since 4.0.0
+   */
+  def trim(e: Column, trim: Column): Column = Column.fn("trim", trim, e)
 
   /**
    * Converts a string column to upper case.
@@ -4579,6 +4787,24 @@ object functions {
    * Extracts a part from a URL.
    *
    * @group url_funcs
+   * @since 4.0.0
+   */
+  def try_parse_url(url: Column, partToExtract: Column, key: Column): Column =
+    Column.fn("try_parse_url", url, partToExtract, key)
+
+  /**
+   * Extracts a part from a URL.
+   *
+   * @group url_funcs
+   * @since 4.0.0
+   */
+  def try_parse_url(url: Column, partToExtract: Column): Column =
+    Column.fn("try_parse_url", url, partToExtract)
+
+  /**
+   * Extracts a part from a URL.
+   *
+   * @group url_funcs
    * @since 3.5.0
    */
   def parse_url(url: Column, partToExtract: Column, key: Column): Column =
@@ -4599,6 +4825,7 @@ object functions {
    * @group string_funcs
    * @since 3.5.0
    */
+  @scala.annotation.varargs
   def printf(format: Column, arguments: Column*): Column =
     Column.fn("printf", (format +: arguments): _*)
 
@@ -4854,6 +5081,15 @@ object functions {
    * @since 3.5.0
    */
   def right(str: Column, len: Column): Column = Column.fn("right", str, len)
+
+  /**
+   * Returns `str` enclosed by single quotes and each instance of single quote in it is preceded
+   * by a backslash.
+   *
+   * @group string_funcs
+   * @since 4.1.0
+   */
+  def quote(str: Column): Column = Column.fn("quote", str)
 
   //////////////////////////////////////////////////////////////////////////////////////////////
   // DateTime functions
@@ -6896,7 +7132,7 @@ object functions {
   def is_variant_null(v: Column): Column = Column.fn("is_variant_null", v)
 
   /**
-   * Extracts a sub-variant from `v` according to `path`, and then cast the sub-variant to
+   * Extracts a sub-variant from `v` according to `path` string, and then cast the sub-variant to
    * `targetType`. Returns null if the path does not exist. Throws an exception if the cast fails.
    *
    * @param v
@@ -6913,7 +7149,25 @@ object functions {
     Column.fn("variant_get", v, lit(path), lit(targetType))
 
   /**
-   * Extracts a sub-variant from `v` according to `path`, and then cast the sub-variant to
+   * Extracts a sub-variant from `v` according to `path` column, and then cast the sub-variant to
+   * `targetType`. Returns null if the path does not exist. Throws an exception if the cast fails.
+   *
+   * @param v
+   *   a variant column.
+   * @param path
+   *   the column containing the extraction path strings. A valid path string should start with
+   *   `$` and is followed by zero or more segments like `[123]`, `.name`, `['name']`, or
+   *   `["name"]`.
+   * @param targetType
+   *   the target data type to cast into, in a DDL-formatted string.
+   * @group variant_funcs
+   * @since 4.0.0
+   */
+  def variant_get(v: Column, path: Column, targetType: String): Column =
+    Column.fn("variant_get", v, path, lit(targetType))
+
+  /**
+   * Extracts a sub-variant from `v` according to `path` string, and then cast the sub-variant to
    * `targetType`. Returns null if the path does not exist or the cast fails..
    *
    * @param v
@@ -6927,6 +7181,24 @@ object functions {
    * @since 4.0.0
    */
   def try_variant_get(v: Column, path: String, targetType: String): Column =
+    Column.fn("try_variant_get", v, lit(path), lit(targetType))
+
+  /**
+   * Extracts a sub-variant from `v` according to `path` column, and then cast the sub-variant to
+   * `targetType`. Returns null if the path does not exist or the cast fails..
+   *
+   * @param v
+   *   a variant column.
+   * @param path
+   *   the column containing the extraction path strings. A valid path string should start with
+   *   `$` and is followed by zero or more segments like `[123]`, `.name`, `['name']`, or
+   *   `["name"]`.
+   * @param targetType
+   *   the target data type to cast into, in a DDL-formatted string.
+   * @group variant_funcs
+   * @since 4.0.0
+   */
+  def try_variant_get(v: Column, path: Column, targetType: String): Column =
     Column.fn("try_variant_get", v, lit(path), lit(targetType))
 
   /**
@@ -7252,7 +7524,18 @@ object functions {
    * @group array_funcs
    * @since 2.4.0
    */
-  def shuffle(e: Column): Column = Column.fn("shuffle", e, lit(SparkClassUtils.random.nextLong))
+  def shuffle(e: Column): Column = shuffle(e, lit(SparkClassUtils.random.nextLong))
+
+  /**
+   * Returns a random permutation of the given array.
+   *
+   * @note
+   *   The function is non-deterministic.
+   *
+   * @group array_funcs
+   * @since 4.0.0
+   */
+  def shuffle(e: Column, seed: Column): Column = Column.fn("shuffle", e, seed)
 
   /**
    * Returns a reversed string or an array with reverse order of elements.
@@ -7847,6 +8130,23 @@ object functions {
     Column.fn("make_dt_interval")
 
   /**
+   * This is a special version of `make_interval` that performs the same operation, but returns a
+   * NULL value instead of raising an error if interval cannot be created.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_interval(
+      years: Column,
+      months: Column,
+      weeks: Column,
+      days: Column,
+      hours: Column,
+      mins: Column,
+      secs: Column): Column =
+    Column.fn("try_make_interval", years, months, weeks, days, hours, mins, secs)
+
+  /**
    * Make interval from years, months, weeks, days, hours, mins and secs.
    *
    * @group datetime_funcs
@@ -7861,6 +8161,22 @@ object functions {
       mins: Column,
       secs: Column): Column =
     Column.fn("make_interval", years, months, weeks, days, hours, mins, secs)
+
+  /**
+   * This is a special version of `make_interval` that performs the same operation, but returns a
+   * NULL value instead of raising an error if interval cannot be created.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_interval(
+      years: Column,
+      months: Column,
+      weeks: Column,
+      days: Column,
+      hours: Column,
+      mins: Column): Column =
+    Column.fn("try_make_interval", years, months, weeks, days, hours, mins)
 
   /**
    * Make interval from years, months, weeks, days, hours and mins.
@@ -7878,6 +8194,21 @@ object functions {
     Column.fn("make_interval", years, months, weeks, days, hours, mins)
 
   /**
+   * This is a special version of `make_interval` that performs the same operation, but returns a
+   * NULL value instead of raising an error if interval cannot be created.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_interval(
+      years: Column,
+      months: Column,
+      weeks: Column,
+      days: Column,
+      hours: Column): Column =
+    Column.fn("try_make_interval", years, months, weeks, days, hours)
+
+  /**
    * Make interval from years, months, weeks, days and hours.
    *
    * @group datetime_funcs
@@ -7892,6 +8223,16 @@ object functions {
     Column.fn("make_interval", years, months, weeks, days, hours)
 
   /**
+   * This is a special version of `make_interval` that performs the same operation, but returns a
+   * NULL value instead of raising an error if interval cannot be created.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_interval(years: Column, months: Column, weeks: Column, days: Column): Column =
+    Column.fn("try_make_interval", years, months, weeks, days)
+
+  /**
    * Make interval from years, months, weeks and days.
    *
    * @group datetime_funcs
@@ -7899,6 +8240,16 @@ object functions {
    */
   def make_interval(years: Column, months: Column, weeks: Column, days: Column): Column =
     Column.fn("make_interval", years, months, weeks, days)
+
+  /**
+   * This is a special version of `make_interval` that performs the same operation, but returns a
+   * NULL value instead of raising an error if interval cannot be created.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_interval(years: Column, months: Column, weeks: Column): Column =
+    Column.fn("try_make_interval", years, months, weeks)
 
   /**
    * Make interval from years, months and weeks.
@@ -7910,6 +8261,16 @@ object functions {
     Column.fn("make_interval", years, months, weeks)
 
   /**
+   * This is a special version of `make_interval` that performs the same operation, but returns a
+   * NULL value instead of raising an error if interval cannot be created.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_interval(years: Column, months: Column): Column =
+    Column.fn("try_make_interval", years, months)
+
+  /**
    * Make interval from years and months.
    *
    * @group datetime_funcs
@@ -7917,6 +8278,16 @@ object functions {
    */
   def make_interval(years: Column, months: Column): Column =
     Column.fn("make_interval", years, months)
+
+  /**
+   * This is a special version of `make_interval` that performs the same operation, but returns a
+   * NULL value instead of raising an error if interval cannot be created.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_interval(years: Column): Column =
+    Column.fn("try_make_interval", years)
 
   /**
    * Make interval from years.
@@ -7974,6 +8345,41 @@ object functions {
     Column.fn("make_timestamp", years, months, days, hours, mins, secs)
 
   /**
+   * Try to create a timestamp from years, months, days, hours, mins, secs and timezone fields.
+   * The result data type is consistent with the value of configuration `spark.sql.timestampType`.
+   * The function returns NULL on invalid inputs.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_timestamp(
+      years: Column,
+      months: Column,
+      days: Column,
+      hours: Column,
+      mins: Column,
+      secs: Column,
+      timezone: Column): Column =
+    Column.fn("try_make_timestamp", years, months, days, hours, mins, secs, timezone)
+
+  /**
+   * Try to create a timestamp from years, months, days, hours, mins, and secs fields. The result
+   * data type is consistent with the value of configuration `spark.sql.timestampType`. The
+   * function returns NULL on invalid inputs.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_timestamp(
+      years: Column,
+      months: Column,
+      days: Column,
+      hours: Column,
+      mins: Column,
+      secs: Column): Column =
+    Column.fn("try_make_timestamp", years, months, days, hours, mins, secs)
+
+  /**
    * Create the current timestamp with local time zone from years, months, days, hours, mins, secs
    * and timezone fields. If the configuration `spark.sql.ansi.enabled` is false, the function
    * returns NULL on invalid inputs. Otherwise, it will throw an error instead.
@@ -8009,6 +8415,39 @@ object functions {
     Column.fn("make_timestamp_ltz", years, months, days, hours, mins, secs)
 
   /**
+   * Try to create the current timestamp with local time zone from years, months, days, hours,
+   * mins, secs and timezone fields. The function returns NULL on invalid inputs.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_timestamp_ltz(
+      years: Column,
+      months: Column,
+      days: Column,
+      hours: Column,
+      mins: Column,
+      secs: Column,
+      timezone: Column): Column =
+    Column.fn("try_make_timestamp_ltz", years, months, days, hours, mins, secs, timezone)
+
+  /**
+   * Try to create the current timestamp with local time zone from years, months, days, hours,
+   * mins and secs fields. The function returns NULL on invalid inputs.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_timestamp_ltz(
+      years: Column,
+      months: Column,
+      days: Column,
+      hours: Column,
+      mins: Column,
+      secs: Column): Column =
+    Column.fn("try_make_timestamp_ltz", years, months, days, hours, mins, secs)
+
+  /**
    * Create local date-time from years, months, days, hours, mins, secs fields. If the
    * configuration `spark.sql.ansi.enabled` is false, the function returns NULL on invalid inputs.
    * Otherwise, it will throw an error instead.
@@ -8024,6 +8463,22 @@ object functions {
       mins: Column,
       secs: Column): Column =
     Column.fn("make_timestamp_ntz", years, months, days, hours, mins, secs)
+
+  /**
+   * Try to create a local date-time from years, months, days, hours, mins, secs fields. The
+   * function returns NULL on invalid inputs.
+   *
+   * @group datetime_funcs
+   * @since 4.0.0
+   */
+  def try_make_timestamp_ntz(
+      years: Column,
+      months: Column,
+      days: Column,
+      hours: Column,
+      mins: Column,
+      secs: Column): Column =
+    Column.fn("try_make_timestamp_ntz", years, months, days, hours, mins, secs)
 
   /**
    * Make year-month interval from years, months.

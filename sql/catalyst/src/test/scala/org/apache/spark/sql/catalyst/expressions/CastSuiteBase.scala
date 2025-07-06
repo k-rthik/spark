@@ -18,7 +18,7 @@
 package org.apache.spark.sql.catalyst.expressions
 
 import java.sql.{Date, Timestamp}
-import java.time.{Duration, LocalDate, LocalDateTime, Period}
+import java.time.{Duration, LocalDate, LocalDateTime, LocalTime, Period}
 import java.time.temporal.ChronoUnit
 import java.util.{Calendar, Locale, TimeZone}
 
@@ -82,7 +82,7 @@ abstract class CastSuiteBase extends SparkFunSuite with ExpressionEvalHelper {
     }
 
     atomicTypes.foreach(dt => checkNullCast(NullType, dt))
-    atomicTypes.foreach(dt => checkNullCast(dt, StringType))
+    (atomicTypes ++ timeTypes).foreach(dt => checkNullCast(dt, StringType))
     checkNullCast(StringType, BinaryType)
     checkNullCast(StringType, BooleanType)
     numericTypes.foreach(dt => checkNullCast(dt, BooleanType))
@@ -729,6 +729,8 @@ abstract class CastSuiteBase extends SparkFunSuite with ExpressionEvalHelper {
       assert(Cast.canUpCast(DateType, TimestampNTZType))
       assert(Cast.canUpCast(TimestampType, TimestampNTZType))
       assert(Cast.canUpCast(TimestampNTZType, TimestampType))
+      assert(Cast.canUpCast(IntegerType, StringType("UTF8_LCASE")))
+      assert(Cast.canUpCast(CalendarIntervalType, StringType("UTF8_LCASE")))
       assert(!Cast.canUpCast(TimestampType, DateType))
       assert(!Cast.canUpCast(TimestampNTZType, DateType))
     }
@@ -1010,6 +1012,13 @@ abstract class CastSuiteBase extends SparkFunSuite with ExpressionEvalHelper {
         DataTypeMismatch(
           "CAST_WITHOUT_SUGGESTION",
           Map("srcType" -> "\"TIMESTAMP_NTZ\"", "targetType" -> s""""${numericType.sql}"""")))
+    }
+  }
+
+  test("allow type conversions between calendar interval type and char/varchar types") {
+    Seq(CharType(10), VarcharType(10))
+      .foreach { typ =>
+        assert(cast(Literal.default(CalendarIntervalType), typ).checkInputDataTypes().isSuccess)
     }
   }
 
@@ -1408,5 +1417,94 @@ abstract class CastSuiteBase extends SparkFunSuite with ExpressionEvalHelper {
     val timestampNTZLiteral = Literal.create(1L, TimestampNTZType)
     assert(!Cast(timestampLiteral, TimestampNTZType).resolved)
     assert(!Cast(timestampNTZLiteral, TimestampType).resolved)
+  }
+
+  test("Casting between TimestampType and StringType requires timezone") {
+    val timestampLiteral = Literal.create(1L, TimestampType)
+    assert(!Cast(timestampLiteral, StringType).resolved)
+    assert(!Cast(timestampLiteral, StringType("UTF8_LCASE")).resolved)
+  }
+
+  test(s"Casting from char/varchar") {
+    Seq(CharType(10), VarcharType(10)).foreach { typ =>
+      Seq(
+        IntegerType -> ("123", 123),
+        LongType -> ("123 ", 123L),
+        BooleanType -> ("true ", true),
+        BooleanType -> ("false", false),
+        DoubleType -> ("1.2", 1.2)
+      ).foreach { case (toType, (from, to)) =>
+        checkEvaluation(cast(Literal.create(from, typ), toType), to)
+      }
+    }
+  }
+
+  test("Casting to char/varchar") {
+    Seq(CharType(10), VarcharType(10)).foreach { typ =>
+      Seq(
+        IntegerType -> (123, "123"),
+        LongType -> (123L, "123"),
+        BooleanType -> (true, "true"),
+        BooleanType -> (false, "false"),
+        DoubleType -> (1.2, "1.2")
+      ).foreach { case (fromType, (from, to)) =>
+        val paddedTo = if (typ.isInstanceOf[CharType]) {
+          to.padTo(10, ' ')
+        } else {
+          to
+        }
+        checkEvaluation(cast(Literal.create(from, fromType), typ), paddedTo)
+      }
+    }
+  }
+
+  test("cast time to string") {
+    Seq(
+      LocalTime.MIDNIGHT -> "00:00:00",
+      LocalTime.NOON -> "12:00:00",
+      LocalTime.of(23, 59, 59) -> "23:59:59",
+      LocalTime.of(23, 59, 59, 1000000) -> "23:59:59.001",
+      LocalTime.of(23, 59, 59, 999999000) -> "23:59:59.999999"
+    ).foreach { case (time, expectedStr) =>
+      checkEvaluation(Cast(Literal(time), StringType), expectedStr)
+    }
+
+    checkConsistencyBetweenInterpretedAndCodegen(
+      (child: Expression) => Cast(child, StringType), TimeType())
+  }
+
+  test("cast string to time") {
+    checkEvaluation(cast(Literal.create("0:0:0"), TimeType()), 0L)
+    checkEvaluation(cast(Literal.create(" 01:2:3.01   "), TimeType(2)), localTime(1, 2, 3, 10000))
+    checkEvaluation(cast(Literal.create(" 12:13:14.999"),
+      TimeType(3)), localTime(12, 13, 14, 999 * 1000))
+    checkEvaluation(cast(Literal.create("23:0:59.0001 "), TimeType(4)), localTime(23, 0, 59, 100))
+    checkEvaluation(cast(Literal.create("23:59:0.99999"),
+      TimeType(5)), localTime(23, 59, 0, 999990))
+    checkEvaluation(cast(Literal.create("23:59:59.000001     "),
+      TimeType(6)), localTime(23, 59, 59, 1))
+  }
+
+  test("cast time to time") {
+    checkEvaluation(cast(Literal(localTime(), TimeType(0)), TimeType(0)), 0L)
+    checkEvaluation(cast(Literal(localTime(0, 0, 0, 1), TimeType(6)), TimeType(6)),
+      localTime(0, 0, 0, 1))
+    checkEvaluation(cast(Literal(localTime(0, 0, 0, 19), TimeType(6)), TimeType(5)),
+      localTime(0, 0, 0, 10))
+    checkEvaluation(cast(Literal(localTime(23, 59, 59, 999990), TimeType(5)), TimeType(6)),
+      localTime(23, 59, 59, 999990))
+    checkEvaluation(cast(Literal(localTime(23, 59, 59, 999999), TimeType(6)), TimeType(5)),
+      localTime(23, 59, 59, 999990))
+    checkEvaluation(cast(Literal(localTime(11, 58, 59, 123400), TimeType(4)), TimeType(5)),
+      localTime(11, 58, 59, 123400))
+    checkEvaluation(cast(Literal(localTime(19, 2, 3, 765000), TimeType(3)), TimeType(2)),
+      localTime(19, 2, 3, 760000))
+
+    for (sp <- TimeType.MIN_PRECISION to TimeType.MAX_PRECISION) {
+      for (tp <- TimeType.MIN_PRECISION to TimeType.MAX_PRECISION) {
+        checkConsistencyBetweenInterpretedAndCodegen(
+          (child: Expression) => Cast(child, TimeType(sp)), TimeType(tp))
+      }
+    }
   }
 }

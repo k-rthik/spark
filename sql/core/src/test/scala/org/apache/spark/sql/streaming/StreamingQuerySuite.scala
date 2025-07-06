@@ -36,14 +36,15 @@ import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException, TestUtils}
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.{AnalysisException, DataFrame, Dataset, Row, SaveMode}
+import org.apache.spark.sql.{AnalysisException, Row, SaveMode}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.plans.logical.{CTERelationDef, CTERelationRef, LocalRelation}
 import org.apache.spark.sql.catalyst.streaming.InternalOutputModes.Complete
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
+import org.apache.spark.sql.classic.{DataFrame, Dataset}
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.connector.read.streaming.{Offset => OffsetV2, ReadLimit}
-import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.execution.exchange.{REQUIRED_BY_STATEFUL_OPERATOR, ReusedExchangeExec, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.execution.streaming.sources.{MemorySink, TestForeachWriter}
 import org.apache.spark.sql.functions._
@@ -103,12 +104,14 @@ class StreamingQuerySuite extends StreamTest with BeforeAndAfter with Logging wi
       var cpDir: String = null
 
       def startQuery(restart: Boolean): StreamingQuery = {
-        if (cpDir == null || !restart) cpDir = s"$dir/${RandomStringUtils.randomAlphabetic(10)}"
+        if (cpDir == null || !restart) {
+          cpDir = s"$dir/${RandomStringUtils.secure.nextAlphabetic(10)}"
+        }
         MemoryStream[Int].toDS().groupBy().count()
           .writeStream
           .format("memory")
           .outputMode("complete")
-          .queryName(s"name${RandomStringUtils.randomAlphabetic(10)}")
+          .queryName(s"name${RandomStringUtils.secure.nextAlphabetic(10)}")
           .option("checkpointLocation", cpDir)
           .start()
       }
@@ -1448,6 +1451,28 @@ class StreamingQuerySuite extends StreamTest with BeforeAndAfter with Logging wi
     }
   }
 
+  test("SPARK-49905 shuffle added by stateful operator should use the shuffle origin " +
+    "`REQUIRED_BY_STATEFUL_OPERATOR`") {
+    val inputData = MemoryStream[Int]
+
+    // Use the streaming aggregation as an example - all stateful operators are using the same
+    // distribution, named `StatefulOpClusteredDistribution`.
+    val df = inputData.toDF().groupBy("value").count()
+
+    testStream(df, OutputMode.Update())(
+      AddData(inputData, 1, 2, 3, 1, 2, 3),
+      CheckAnswer((1, 2), (2, 2), (3, 2)),
+      Execute { qe =>
+        val shuffleOpt = qe.lastExecution.executedPlan.collect {
+          case s: ShuffleExchangeExec => s
+        }
+
+        assert(shuffleOpt.nonEmpty, "No shuffle exchange found in the query plan")
+        assert(shuffleOpt.head.shuffleOrigin === REQUIRED_BY_STATEFUL_OPERATOR)
+      }
+    )
+  }
+
   private def checkAppendOutputModeException(df: DataFrame): Unit = {
     withTempDir { outputDir =>
       withTempDir { checkpointDir =>
@@ -1474,7 +1499,7 @@ class StreamingQuerySuite extends StreamTest with BeforeAndAfter with Logging wi
       override def schema: StructType = triggerDF.schema
       override def getOffset: Option[Offset] = Some(LongOffset(0))
       override def getBatch(start: Option[Offset], end: Offset): DataFrame = {
-        sqlContext.internalCreateDataFrame(
+        sqlContext.sparkSession.internalCreateDataFrame(
           triggerDF.queryExecution.toRdd, triggerDF.schema, isStreaming = true)
       }
       override def stop(): Unit = {}

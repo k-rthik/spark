@@ -16,6 +16,8 @@
  */
 package org.apache.spark.sql.vectorized;
 
+import scala.PartialFunction;
+
 import org.apache.spark.annotation.Evolving;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.Decimal;
@@ -67,6 +69,18 @@ public abstract class ColumnVector implements AutoCloseable {
    */
   @Override
   public abstract void close();
+
+  /**
+   * Cleans up memory for this column vector if it's resources are freeable between batches.
+   * The column vector is not usable after this.
+   *
+   * If this is a writable column vector or constant column vector, it is a no-op.
+   */
+  public void closeIfFreeable() {
+    // By default, we just call close() for all column vectors. If a column vector is writable or
+    // constant, it should override this method and do nothing.
+    close();
+  }
 
   /**
    * Returns true if this column vector contains any null values.
@@ -324,10 +338,21 @@ public abstract class ColumnVector implements AutoCloseable {
    * Sets up the data type of this column vector.
    */
   protected ColumnVector(DataType type) {
-    if (type instanceof UserDefinedType) {
-      this.type = ((UserDefinedType) type).sqlType();
-    } else {
-      this.type = type;
-    }
+    this.type = type.transformRecursively(
+      new PartialFunction<DataType, DataType>() {
+        @Override
+        public boolean isDefinedAt(DataType x) {
+          return x instanceof UserDefinedType<?>;
+        }
+
+        @Override
+        public DataType apply(DataType t) {
+          if (t instanceof UserDefinedType<?> udt) {
+            return udt.sqlType();
+          } else {
+            return t;
+          }
+        }
+      });
   }
 }

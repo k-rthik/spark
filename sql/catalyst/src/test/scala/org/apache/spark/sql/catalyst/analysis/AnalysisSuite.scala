@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.catalyst.analysis
 
-import java.util.TimeZone
+import java.util.{TimeZone, UUID}
 
 import scala.jdk.CollectionConverters._
 import scala.reflect.ClassTag
@@ -30,7 +30,7 @@ import org.apache.spark.SparkException
 import org.apache.spark.api.python.PythonEvalType
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.{AliasIdentifier, QueryPlanningTracker, TableIdentifier}
-import org.apache.spark.sql.catalyst.catalog.{InMemoryCatalog, SessionCatalog}
+import org.apache.spark.sql.catalyst.catalog.{InMemoryCatalog, SessionCatalog, VariableDefinition}
 import org.apache.spark.sql.catalyst.dsl.expressions._
 import org.apache.spark.sql.catalyst.dsl.plans._
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
@@ -42,7 +42,7 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning, RangePartitioning, RoundRobinPartitioning}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.catalyst.util._
-import org.apache.spark.sql.connector.catalog.InMemoryTable
+import org.apache.spark.sql.connector.catalog.{Identifier, InMemoryTable}
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.internal.SQLConf
@@ -78,6 +78,24 @@ class AnalysisSuite extends AnalysisTest with Matchers {
         parameters = Map("message" ->
           "Logical plan should not have output of char/varchar type.*\n"),
         matchPVals = true)
+    }
+  }
+
+  test(s"do not fail if a leaf node has char/varchar type output and " +
+    s"${SQLConf.PRESERVE_CHAR_VARCHAR_TYPE_INFO.key} is true") {
+    withSQLConf(SQLConf.PRESERVE_CHAR_VARCHAR_TYPE_INFO.key -> "true") {
+      val schema1 = new StructType().add("c", CharType(5))
+      val schema2 = new StructType().add("c", VarcharType(5))
+      val schema3 = new StructType().add("c", ArrayType(CharType(5)))
+      Seq(schema1, schema2, schema3).foreach { schema =>
+        val table = new InMemoryTable("t", schema, Array.empty, Map.empty[String, String].asJava)
+        DataSourceV2Relation(
+          table,
+          DataTypeUtils.toAttributes(schema),
+          None,
+          None,
+          CaseInsensitiveStringMap.empty()).analyze
+      }
     }
   }
 
@@ -777,6 +795,14 @@ class AnalysisSuite extends AnalysisTest with Matchers {
         PosExplode($"list"), Seq("first_pos", "first_val")), Seq("second_pos", "second_val"))))
   }
 
+  test("SPARK-50497 Non-generator function with multiple aliases") {
+    assertAnalysisErrorCondition(parsePlan("SELECT 'length' (a)"),
+      "MULTI_ALIAS_WITHOUT_GENERATOR",
+      Map("expr" -> "\"length\"", "names" -> "a"),
+      Array(ExpectedContext("'length' (a)", 7, 18))
+    )
+  }
+
   test("SPARK-24151: CURRENT_DATE, CURRENT_TIMESTAMP should be case insensitive") {
     withSQLConf(SQLConf.CASE_SENSITIVE.key -> "true") {
       val input = Project(Seq(
@@ -792,6 +818,25 @@ class AnalysisSuite extends AnalysisTest with Matchers {
       checkAnalysis(input, expected)
     }
   }
+
+  test("CURRENT_TIME should be case insensitive") {
+    withSQLConf(SQLConf.CASE_SENSITIVE.key -> "true") {
+      val input = Project(Seq(
+        // The user references "current_time" or "CURRENT_TIME" in the query
+        UnresolvedAttribute("current_time"),
+        UnresolvedAttribute("CURRENT_TIME")
+      ), testRelation)
+
+      // The analyzer should resolve both to the same expression: CurrentTime()
+      val expected = Project(Seq(
+        Alias(CurrentTime(), toPrettySQL(CurrentTime()))(),
+        Alias(CurrentTime(), toPrettySQL(CurrentTime()))()
+      ), testRelation).analyze
+
+      checkAnalysis(input, expected)
+    }
+  }
+
 
   test("CTE with non-existing column alias") {
     assertAnalysisErrorCondition(parsePlan("WITH t(x) AS (SELECT 1) SELECT * FROM t WHERE y = 1"),
@@ -1161,7 +1206,8 @@ class AnalysisSuite extends AnalysisTest with Matchers {
               Seq(Literal(3)),
               Project(testRelation.output, testRelation)
             )
-          )
+          ),
+          None
         )
       )
     )
@@ -1474,10 +1520,13 @@ class AnalysisSuite extends AnalysisTest with Matchers {
 
   test("Execute Immediate plan transformation") {
     try {
+    val varDef1 = VariableDefinition(Identifier.of(Array("res"), "res"), "1", Literal(1))
     SimpleAnalyzer.catalogManager.tempVariableManager.create(
-      "res", "1", Literal(1), overrideIfExists = true)
+      Seq("res", "res"), varDef1, overrideIfExists = true)
+
+    val varDef2 = VariableDefinition(Identifier.of(Array("res2"), "res2"), "1", Literal(1))
     SimpleAnalyzer.catalogManager.tempVariableManager.create(
-      "res2", "1", Literal(1), overrideIfExists = true)
+      Seq("res2", "res2"), varDef2, overrideIfExists = true)
     val actual1 = parsePlan("EXECUTE IMMEDIATE 'SELECT 42 WHERE ? = 1' USING 2").analyze
     val expected1 = parsePlan("SELECT 42 where 2 = 1").analyze
     comparePlans(actual1, expected1)
@@ -1488,11 +1537,12 @@ class AnalysisSuite extends AnalysisTest with Matchers {
     // Test that plan is transformed to SET operation
     val actual3 = parsePlan(
       "EXECUTE IMMEDIATE 'SELECT 17, 7 WHERE ? = 1' INTO res, res2 USING 2").analyze
+      // Normalize to make the plan equivalent to the below set statement.
     val expected3 = parsePlan("SET var (res, res2) = (SELECT 17, 7 where 2 = 1)").analyze
       comparePlans(actual3, expected3)
     } finally {
-      SimpleAnalyzer.catalogManager.tempVariableManager.remove("res")
-      SimpleAnalyzer.catalogManager.tempVariableManager.remove("res2")
+      SimpleAnalyzer.catalogManager.tempVariableManager.remove(Seq("res"))
+      SimpleAnalyzer.catalogManager.tempVariableManager.remove(Seq("res2"))
     }
   }
 
@@ -1763,7 +1813,7 @@ class AnalysisSuite extends AnalysisTest with Matchers {
   }
 
   test("SPARK-46064 Basic functionality of elimination for watermark node in batch query") {
-    val dfWithEventTimeWatermark = EventTimeWatermark($"ts",
+    val dfWithEventTimeWatermark = EventTimeWatermark(UUID.randomUUID(), $"ts",
       IntervalUtils.fromIntervalString("10 seconds"), batchRelationWithTs)
 
     val analyzed = getAnalyzer.executeAndCheck(dfWithEventTimeWatermark, new QueryPlanningTracker)
@@ -1776,7 +1826,7 @@ class AnalysisSuite extends AnalysisTest with Matchers {
     "EventTimeWatermark changes the isStreaming flag during resolution") {
     // UnresolvedRelation which is batch initially and will be resolved as streaming
     val dfWithTempView = UnresolvedRelation(TableIdentifier("streamingTable"))
-    val dfWithEventTimeWatermark = EventTimeWatermark($"ts",
+    val dfWithEventTimeWatermark = EventTimeWatermark(UUID.randomUUID(), $"ts",
       IntervalUtils.fromIntervalString("10 seconds"), dfWithTempView)
 
     val analyzed = getAnalyzer.executeAndCheck(dfWithEventTimeWatermark, new QueryPlanningTracker)
@@ -1831,5 +1881,15 @@ class AnalysisSuite extends AnalysisTest with Matchers {
 
     preemptedError.clear()
     assert(preemptedError.getErrorOpt().isEmpty)
+  }
+
+  test("SPARK-49782: ResolveDataFrameDropColumns rule resolves complex UnresolvedAttribute") {
+    val function = UnresolvedFunction("trim", Seq(UnresolvedAttribute("i")), isDistinct = false)
+    val addColumnF = Project(Seq(UnresolvedAttribute("i"), Alias(function, "f")()), testRelation5)
+    // Drop column "f" via ResolveDataFrameDropColumns rule.
+    val inputPlan = DataFrameDropColumns(Seq(UnresolvedAttribute("f")), addColumnF)
+    // The expected Project (root node) should only have column "i".
+    val expectedPlan = Project(Seq(UnresolvedAttribute("i")), addColumnF).analyze
+    checkAnalysis(inputPlan, expectedPlan)
   }
 }

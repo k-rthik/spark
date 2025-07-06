@@ -17,6 +17,8 @@
 package org.apache.spark.sql.execution.datasources.v2.state
 
 import java.io.{File, FileWriter}
+import java.nio.ByteOrder
+import java.util.UUID
 
 import org.apache.hadoop.conf.Configuration
 import org.scalatest.Assertions
@@ -27,7 +29,7 @@ import org.apache.spark.sql.{AnalysisException, DataFrame, Encoders, Row}
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, GenericInternalRow}
 import org.apache.spark.sql.catalyst.plans.physical.HashPartitioning
 import org.apache.spark.sql.execution.datasources.v2.state.utils.SchemaUtil
-import org.apache.spark.sql.execution.streaming.{CommitLog, MemoryStream, OffsetSeqLog}
+import org.apache.spark.sql.execution.streaming.{CommitLog, MemoryStream, OffsetSeqLog, StreamExecution}
 import org.apache.spark.sql.execution.streaming.state._
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.internal.SQLConf
@@ -287,6 +289,44 @@ class StateDataSourceNegativeTestSuite extends StateDataSourceTestBase {
         matchPVals = true)
     }
   }
+
+  test("ERROR: trying to specify state variable name along with " +
+    "readRegisteredTimers should fail") {
+    withTempDir { tempDir =>
+      val exc = intercept[StateDataSourceConflictOptions] {
+        spark.read.format("statestore")
+          // trick to bypass getting the last committed batch before validating operator ID
+          .option(StateSourceOptions.BATCH_ID, 0)
+          .option(StateSourceOptions.STATE_VAR_NAME, "test")
+          .option(StateSourceOptions.READ_REGISTERED_TIMERS, true)
+          .load(tempDir.getAbsolutePath)
+      }
+      checkError(exc, "STDS_CONFLICT_OPTIONS", "42613",
+        Map("options" ->
+          s"['${
+            StateSourceOptions.READ_REGISTERED_TIMERS
+          }', '${StateSourceOptions.STATE_VAR_NAME}']"))
+    }
+  }
+
+  test("ERROR: trying to specify non boolean value for " +
+    "flattenCollectionTypes") {
+    withTempDir { tempDir =>
+      runDropDuplicatesQuery(tempDir.getAbsolutePath)
+
+      val exc = intercept[StateDataSourceInvalidOptionValue] {
+        spark.read.format("statestore")
+          // trick to bypass getting the last committed batch before validating operator ID
+          .option(StateSourceOptions.BATCH_ID, 0)
+          .option(StateSourceOptions.FLATTEN_COLLECTION_TYPES, "test")
+          .load(tempDir.getAbsolutePath)
+      }
+      checkError(exc, "STDS_INVALID_OPTION_VALUE.WITH_MESSAGE", Some("42616"),
+        Map("optionName" -> StateSourceOptions.FLATTEN_COLLECTION_TYPES,
+          "message" -> ".*"),
+        matchPVals = true)
+    }
+  }
 }
 
 /**
@@ -419,19 +459,19 @@ class HDFSBackedStateDataSourceReadSuite extends StateDataSourceReadSuite {
     testSnapshotPartitionId()
   }
 
-  test("snapshotStatBatchId on limit state") {
+  test("snapshotStartBatchId on limit state") {
     testSnapshotOnLimitState("hdfs")
   }
 
-  test("snapshotStatBatchId on aggregation state") {
+  test("snapshotStartBatchId on aggregation state") {
     testSnapshotOnAggregateState("hdfs")
   }
 
-  test("snapshotStatBatchId on deduplication state") {
+  test("snapshotStartBatchId on deduplication state") {
     testSnapshotOnDeduplicateState("hdfs")
   }
 
-  test("snapshotStatBatchId on join state") {
+  test("snapshotStartBatchId on join state") {
     testSnapshotOnJoinState("hdfs", 1)
     testSnapshotOnJoinState("hdfs", 2)
   }
@@ -512,19 +552,19 @@ StateDataSourceReadSuite {
     testSnapshotPartitionId()
   }
 
-  test("snapshotStatBatchId on limit state") {
+  test("snapshotStartBatchId on limit state") {
     testSnapshotOnLimitState("rocksdb")
   }
 
-  test("snapshotStatBatchId on aggregation state") {
+  test("snapshotStartBatchId on aggregation state") {
     testSnapshotOnAggregateState("rocksdb")
   }
 
-  test("snapshotStatBatchId on deduplication state") {
+  test("snapshotStartBatchId on deduplication state") {
     testSnapshotOnDeduplicateState("rocksdb")
   }
 
-  test("snapshotStatBatchId on join state") {
+  test("snapshotStartBatchId on join state") {
     testSnapshotOnJoinState("rocksdb", 1)
     testSnapshotOnJoinState("rocksdb", 2)
   }
@@ -549,6 +589,8 @@ abstract class StateDataSourceReadSuite extends StateDataSourceTestBase with Ass
    */
   private def getNewStateStoreProvider(checkpointDir: String): StateStoreProvider = {
     val provider = newStateStoreProvider()
+    val conf = new Configuration()
+    conf.set(StreamExecution.RUN_ID_KEY, UUID.randomUUID().toString)
     provider.init(
       StateStoreId(checkpointDir, 0, 0),
       keySchema,
@@ -556,7 +598,7 @@ abstract class StateDataSourceReadSuite extends StateDataSourceTestBase with Ass
       NoPrefixKeyStateEncoderSpec(keySchema),
       useColumnFamilies = false,
       StateStoreConf(spark.sessionState.conf),
-      new Configuration)
+      conf)
     provider
   }
 
@@ -756,6 +798,11 @@ abstract class StateDataSourceReadSuite extends StateDataSourceTestBase with Ass
   }
 
   test("flatMapGroupsWithState, state ver 1") {
+    // Skip this test on big endian platforms because the timestampTimeoutAttribute of
+    // StateManagerImplV1 is declared as IntegerType instead of LongType which breaks
+    // serialization on big endian. This can't be fixed because it would be a breaking
+    // schema change.
+    assume(ByteOrder.nativeOrder().equals(ByteOrder.LITTLE_ENDIAN))
     testFlatMapGroupsWithState(1)
   }
 
@@ -1099,7 +1146,7 @@ abstract class StateDataSourceReadSuite extends StateDataSourceTestBase with Ass
       val exc = intercept[StateStoreSnapshotPartitionNotFound] {
         stateDfError.show()
       }
-      assert(exc.getErrorClass === "CANNOT_LOAD_STATE_STORE.SNAPSHOT_PARTITION_ID_NOT_FOUND")
+      assert(exc.getCondition === "CANNOT_LOAD_STATE_STORE.SNAPSHOT_PARTITION_ID_NOT_FOUND")
     }
   }
 

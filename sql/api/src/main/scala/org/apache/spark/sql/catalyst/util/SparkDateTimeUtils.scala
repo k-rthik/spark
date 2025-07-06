@@ -19,6 +19,7 @@ package org.apache.spark.sql.catalyst.util
 import java.lang.invoke.{MethodHandles, MethodType}
 import java.sql.{Date, Timestamp}
 import java.time.{Instant, LocalDate, LocalDateTime, LocalTime, ZonedDateTime, ZoneId, ZoneOffset}
+import java.time.temporal.ChronoField.NANO_OF_DAY
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit.{MICROSECONDS, NANOSECONDS}
 import java.util.regex.Pattern
@@ -29,7 +30,7 @@ import org.apache.spark.QueryContext
 import org.apache.spark.sql.catalyst.util.DateTimeConstants._
 import org.apache.spark.sql.catalyst.util.RebaseDateTime.{rebaseGregorianToJulianDays, rebaseGregorianToJulianMicros, rebaseJulianToGregorianDays, rebaseJulianToGregorianMicros}
 import org.apache.spark.sql.errors.ExecutionErrors
-import org.apache.spark.sql.types.{DateType, TimestampType}
+import org.apache.spark.sql.types.{DateType, TimestampType, TimeType}
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.SparkClassUtils
 
@@ -41,12 +42,16 @@ trait SparkDateTimeUtils {
   final val singleMinuteTz = Pattern.compile("(\\+|\\-)(\\d\\d):(\\d)$")
 
   def getZoneId(timeZoneId: String): ZoneId = {
-    // To support the (+|-)h:mm format because it was supported before Spark 3.0.
-    var formattedZoneId = singleHourTz.matcher(timeZoneId).replaceFirst("$10$2:")
-    // To support the (+|-)hh:m format because it was supported before Spark 3.0.
-    formattedZoneId = singleMinuteTz.matcher(formattedZoneId).replaceFirst("$1$2:0$3")
-
-    ZoneId.of(formattedZoneId, ZoneId.SHORT_IDS)
+    try {
+      // To support the (+|-)h:mm format because it was supported before Spark 3.0.
+      var formattedZoneId = singleHourTz.matcher(timeZoneId).replaceFirst("$10$2:")
+      // To support the (+|-)hh:m format because it was supported before Spark 3.0.
+      formattedZoneId = singleMinuteTz.matcher(formattedZoneId).replaceFirst("$1$2:0$3")
+      ZoneId.of(formattedZoneId, ZoneId.SHORT_IDS)
+    } catch {
+      case e: java.time.DateTimeException =>
+        throw ExecutionErrors.zoneOffsetError(timeZoneId, e)
+    }
   }
 
   def getTimeZone(timeZoneId: String): TimeZone = TimeZone.getTimeZone(getZoneId(timeZoneId))
@@ -79,6 +84,12 @@ trait SparkDateTimeUtils {
   }
 
   /**
+   * Converts the time to microseconds since midnight. In Spark time values have nanoseconds
+   * precision, so this conversion is lossy.
+   */
+  def nanosToMicros(nanos: Long): Long = Math.floorDiv(nanos, MICROS_PER_MILLIS)
+
+  /**
    * Converts the timestamp to milliseconds since epoch. In Spark timestamp values have
    * microseconds precision, so this conversion is lossy.
    */
@@ -95,6 +106,11 @@ trait SparkDateTimeUtils {
   def millisToMicros(millis: Long): Long = {
     Math.multiplyExact(millis, MICROS_PER_MILLIS)
   }
+
+  /**
+   * Converts microseconds since the midnight to nanoseconds.
+   */
+  def microsToNanos(micros: Long): Long = Math.multiplyExact(micros, NANOS_PER_MICROS)
 
   // See issue SPARK-35679
   // min second cause overflow in instant to micro
@@ -126,6 +142,45 @@ trait SparkDateTimeUtils {
       val us = Math.multiplyExact(secs, MICROS_PER_SECOND)
       Math.addExact(us, NANOSECONDS.toMicros(instant.getNano))
     }
+  }
+
+  /**
+   * Gets the number of nanoseconds since midnight using the given time zone.
+   */
+  def instantToNanosOfDay(instant: Instant, timezone: String): Long = {
+    instantToNanosOfDay(instant, getZoneId(timezone))
+  }
+
+  /**
+   * Gets the number of nanoseconds since midnight using the given time zone.
+   */
+  def instantToNanosOfDay(instant: Instant, zoneId: ZoneId): Long = {
+    val localDateTime = LocalDateTime.ofInstant(instant, zoneId)
+    localDateTime.toLocalTime.getLong(NANO_OF_DAY)
+  }
+
+  /**
+   * Truncates a time value (in nanoseconds) to the specified fractional precision `p`.
+   *
+   * For example, if `p = 3`, we keep millisecond resolution and discard any digits beyond the
+   * thousand-nanosecond place. So a value like `123456` microseconds (12:34:56.123456) becomes
+   * `123000` microseconds (12:34:56.123).
+   *
+   * @param nanos
+   *   The original time in nanoseconds.
+   * @param p
+   *   The fractional second precision (range 0 to 6).
+   * @return
+   *   The truncated nanosecond value, preserving only `p` fractional digits.
+   */
+  def truncateTimeToPrecision(nanos: Long, p: Int): Long = {
+    assert(
+      TimeType.MIN_PRECISION <= p && p <= TimeType.MAX_PRECISION,
+      s"Fractional second precision $p out" +
+        s" of range [${TimeType.MIN_PRECISION}..${TimeType.MAX_PRECISION}].")
+    val scale = TimeType.NANOS_PRECISION - p
+    val factor = math.pow(10, scale).toLong
+    (nanos / factor) * factor
   }
 
   /**
@@ -179,6 +234,17 @@ trait SparkDateTimeUtils {
     val instant = daysToLocalDate(days).atStartOfDay(zoneId).toInstant
     instantToMicros(instant)
   }
+
+  /**
+   * Converts the local time to the number of nanoseconds within the day, from 0 to (24 * 60 * 60
+   * * 1000 * 1000 * 1000) - 1.
+   */
+  def localTimeToNanos(localTime: LocalTime): Long = localTime.getLong(NANO_OF_DAY)
+
+  /**
+   * Converts the number of nanoseconds within the day to the local time.
+   */
+  def nanosToLocalTime(nanos: Long): LocalTime = LocalTime.ofNanoOfDay(nanos)
 
   /**
    * Converts a local date at the default JVM time zone to the number of days since 1970-01-01 in
@@ -639,6 +705,35 @@ trait SparkDateTimeUtils {
       Some(localDateTimeToMicros(localDateTime))
     } catch {
       case NonFatal(_) => None
+    }
+  }
+
+  /**
+   * Trims and parses a given UTF8 string to a corresponding [[Long]] value which representing the
+   * number of microseconds since the midnight. The result will be independent of time zones.
+   *
+   * The return type is [[Option]] in order to distinguish between 0L and null. Please refer to
+   * `parseTimestampString` for the allowed formats.
+   */
+  def stringToTime(s: UTF8String): Option[Long] = {
+    try {
+      val (segments, zoneIdOpt, justTime) = parseTimestampString(s)
+      // If the input string can't be parsed as a time, or it contains not only
+      // the time part or has time zone information, return None.
+      if (segments.isEmpty || !justTime || zoneIdOpt.isDefined) {
+        return None
+      }
+      val nanoseconds = MICROSECONDS.toNanos(segments(6))
+      val localTime = LocalTime.of(segments(3), segments(4), segments(5), nanoseconds.toInt)
+      Some(localTimeToNanos(localTime))
+    } catch {
+      case NonFatal(_) => None
+    }
+  }
+
+  def stringToTimeAnsi(s: UTF8String, context: QueryContext = null): Long = {
+    stringToTime(s).getOrElse {
+      throw ExecutionErrors.invalidInputInCastToDatetimeError(s, TimeType(), context)
     }
   }
 

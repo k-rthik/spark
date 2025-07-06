@@ -112,12 +112,12 @@ options for deployment:
 * [SparkR (Deprecated)](sparkr.html): processing data with Spark in R
 * [PySpark](api/python/getting_started/index.html): processing data with Spark in Python
 * [Spark SQL CLI](sql-distributed-sql-engine-spark-sql-cli.html): processing data with SQL on the command line
+* [Declarative Pipelines](declarative-pipelines-programming-guide.html): building data pipelines that create and maintain multiple tables
 
 **API Docs:**
 
 * [Spark Python API (Sphinx)](api/python/index.html)
 * [Spark Scala API (Scaladoc)](api/scala/org/apache/spark/index.html)
-* [Spark Connect Scala Client API (Scaladoc)](api/connect/scala/org/apache/spark/index.html)
 * [Spark Java API (Javadoc)](api/java/index.html)
 * [Spark R API (Roxygen2)](api/R/index.html)
 * [Spark SQL, Built-in Functions (MkDocs)](api/sql/index.html)

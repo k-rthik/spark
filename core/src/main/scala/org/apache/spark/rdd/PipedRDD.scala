@@ -90,7 +90,7 @@ private[spark] class PipedRDD[T: ClassTag](
       val currentDir = new File(".")
       logDebug("currentDir = " + currentDir.getAbsolutePath())
       val taskDirFile = new File(taskDirectory)
-      taskDirFile.mkdirs()
+      Utils.createDirectory(taskDirFile)
 
       try {
         val tasksDirFilter = new NotEqualsFileNameFilter("tasks")
@@ -240,7 +240,7 @@ private object PipedRDD {
   def tokenize(command: String): Seq[String] = {
     val buf = new ArrayBuffer[String]
     val tok = new StringTokenizer(command)
-    while(tok.hasMoreElements) {
+    while (tok.hasMoreElements) {
       buf += tok.nextToken()
     }
     buf.toSeq

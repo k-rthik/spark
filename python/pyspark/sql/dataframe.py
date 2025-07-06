@@ -17,6 +17,8 @@
 
 # mypy: disable-error-code="empty-body"
 
+import sys
+import random
 from typing import (
     Any,
     Callable,
@@ -40,6 +42,7 @@ from pyspark.sql.column import Column
 from pyspark.sql.readwriter import DataFrameWriter, DataFrameWriterV2
 from pyspark.sql.merge import MergeIntoWriter
 from pyspark.sql.streaming import DataStreamWriter
+from pyspark.sql.table_arg import TableArg
 from pyspark.sql.types import StructType, Row
 from pyspark.sql.utils import dispatch_df_method
 
@@ -753,6 +756,10 @@ class DataFrame:
         -------
         :class:`DataFrame`
 
+        See Also
+        --------
+        DataFrame.subtract : Similar to `exceptAll`, but eliminates duplicates.
+
         Examples
         --------
         >>> df1 = spark.createDataFrame(
@@ -1015,7 +1022,9 @@ class DataFrame:
         """
         ...
 
-    def localCheckpoint(self, eager: bool = True) -> "DataFrame":
+    def localCheckpoint(
+        self, eager: bool = True, storageLevel: Optional[StorageLevel] = None
+    ) -> "DataFrame":
         """Returns a locally checkpointed version of this :class:`DataFrame`. Checkpointing can
         be used to truncate the logical plan of this :class:`DataFrame`, which is especially
         useful in iterative algorithms where the plan may grow exponentially. Local checkpoints
@@ -1026,11 +1035,16 @@ class DataFrame:
 
         .. versionchanged:: 4.0.0
             Supports Spark Connect.
+            Added storageLevel parameter.
 
         Parameters
         ----------
         eager : bool, optional, default True
             Whether to checkpoint this :class:`DataFrame` immediately.
+
+        storageLevel : :class:`StorageLevel`, optional, default None
+            The StorageLevel with which the checkpoint will be stored.
+            If not specified, default for RDD local checkpoints.
 
         Returns
         -------
@@ -2040,6 +2054,46 @@ class DataFrame:
         """
         ...
 
+    def _preapare_args_for_sample(
+        self,
+        withReplacement: Optional[Union[float, bool]] = None,
+        fraction: Optional[Union[int, float]] = None,
+        seed: Optional[int] = None,
+    ) -> Tuple[bool, float, int]:
+        from pyspark.errors import PySparkTypeError
+
+        if isinstance(withReplacement, bool) and isinstance(fraction, float):
+            # For the cases below:
+            #   sample(True, 0.5 [, seed])
+            #   sample(True, fraction=0.5 [, seed])
+            #   sample(withReplacement=False, fraction=0.5 [, seed])
+            _seed = int(seed) if seed is not None else random.randint(0, sys.maxsize)
+            return withReplacement, fraction, _seed
+
+        elif withReplacement is None and isinstance(fraction, float):
+            # For the case below:
+            #   sample(faction=0.5 [, seed])
+            _seed = int(seed) if seed is not None else random.randint(0, sys.maxsize)
+            return False, fraction, _seed
+
+        elif isinstance(withReplacement, float):
+            # For the case below:
+            #   sample(0.5 [, seed])
+            _seed = int(fraction) if fraction is not None else random.randint(0, sys.maxsize)
+            _fraction = float(withReplacement)
+            return False, _fraction, _seed
+
+        else:
+            argtypes = [type(arg).__name__ for arg in [withReplacement, fraction, seed]]
+            raise PySparkTypeError(
+                errorClass="NOT_BOOL_OR_FLOAT_OR_INT",
+                messageParameters={
+                    "arg_name": "withReplacement (optional), "
+                    + "fraction (required) and seed (optional)",
+                    "arg_type": ", ".join(argtypes),
+                },
+            )
+
     @dispatch_df_method
     def sampleBy(
         self, col: "ColumnOrName", fractions: Dict[Any, float], seed: Optional[int] = None
@@ -2073,15 +2127,16 @@ class DataFrame:
         Examples
         --------
         >>> from pyspark.sql.functions import col
-        >>> dataset = spark.range(0, 100).select((col("id") % 3).alias("key"))
+        >>> dataset = spark.range(0, 100, 1, 5).select((col("id") % 3).alias("key"))
         >>> sampled = dataset.sampleBy("key", fractions={0: 0.1, 1: 0.2}, seed=0)
         >>> sampled.groupBy("key").count().orderBy("key").show()
         +---+-----+
         |key|count|
         +---+-----+
-        |  0|    3|
-        |  1|    6|
+        |  0|    4|
+        |  1|    9|
         +---+-----+
+
         >>> dataset.sampleBy(col("key"), fractions={2: 1.0}, seed=0).count()
         33
         """
@@ -2224,6 +2279,28 @@ class DataFrame:
         ...     [(30, "Eve", "FL"), (40, "Sam", "WA")], ["age", "name", "location"])
         >>> df.columns == df2.columns
         False
+        """
+        ...
+
+    @dispatch_df_method
+    def metadataColumn(self, colName: str) -> Column:
+        """
+        Selects a metadata column based on its logical column name and returns it as a
+        :class:`Column`.
+
+        A metadata column can be accessed this way even if the underlying data source defines a data
+        column with a conflicting name.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        colName : str
+            string, metadata column name
+
+        Returns
+        -------
+        :class:`Column`
         """
         ...
 
@@ -2500,7 +2577,7 @@ class DataFrame:
         pyspark.errors.exceptions.captured.AnalysisException: Column name#0 are ambiguous...
 
         A better approach is to assign aliases to the dataframes, and then reference
-        the ouptut columns from the join operation using these aliases:
+        the output columns from the join operation using these aliases:
 
         >>> df.alias("a").join(
         ...     df.alias("b"), sf.col("a.name") == sf.col("b.name"), "outer"
@@ -2577,6 +2654,108 @@ class DataFrame:
         +-----+---+
         |Alice|  2|
         +-----+---+
+        """
+        ...
+
+    def lateralJoin(
+        self,
+        other: "DataFrame",
+        on: Optional[Column] = None,
+        how: Optional[str] = None,
+    ) -> "DataFrame":
+        """
+        Lateral joins with another :class:`DataFrame`, using the given join expression.
+
+        A lateral join (also known as a correlated join) is a type of join where each row from
+        one DataFrame is used as input to a subquery or a derived table that computes a result
+        specific to that row. The right side `DataFrame` can reference columns from the current
+        row of the left side `DataFrame`, allowing for more complex and context-dependent results
+        than a standard join.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        other : :class:`DataFrame`
+            Right side of the join
+        on : :class:`Column`, optional
+            a join expression (Column).
+        how : str, optional
+            default ``inner``. Must be one of: ``inner``, ``cross``, ``left``, ``leftouter``,
+            and ``left_outer``.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            Joined DataFrame.
+
+        Examples
+        --------
+        Setup a sample DataFrame.
+
+        >>> from pyspark.sql import functions as sf
+        >>> from pyspark.sql import Row
+        >>> customers_data = [
+        ...     Row(customer_id=1, name="Alice"), Row(customer_id=2, name="Bob"),
+        ...     Row(customer_id=3, name="Charlie"), Row(customer_id=4, name="Diana")
+        ... ]
+        >>> customers = spark.createDataFrame(customers_data)
+        >>> orders_data = [
+        ...     Row(order_id=101, customer_id=1, order_date="2024-01-10",
+        ...         items=[Row(product="laptop", quantity=5), Row(product="mouse", quantity=12)]),
+        ...     Row(order_id=102, customer_id=1, order_date="2024-02-15",
+        ...         items=[Row(product="phone", quantity=2), Row(product="charger", quantity=15)]),
+        ...     Row(order_id=105, customer_id=1, order_date="2024-03-20",
+        ...         items=[Row(product="tablet", quantity=4)]),
+        ...     Row(order_id=103, customer_id=2, order_date="2024-01-12",
+        ...         items=[Row(product="tablet", quantity=8)]),
+        ...     Row(order_id=104, customer_id=2, order_date="2024-03-05",
+        ...         items=[Row(product="laptop", quantity=7)]),
+        ...     Row(order_id=106, customer_id=3, order_date="2024-04-05",
+        ...         items=[Row(product="monitor", quantity=1)]),
+        ... ]
+        >>> orders = spark.createDataFrame(orders_data)
+
+        Example 1 (use TVF): Expanding Items in Each Order into Separate Rows
+
+        >>> customers.join(orders, "customer_id").lateralJoin(
+        ...     spark.tvf.explode(sf.col("items").outer()).select("col.*")
+        ... ).select(
+        ...     "customer_id", "name", "order_id", "order_date", "product", "quantity"
+        ... ).orderBy("customer_id", "order_id", "product").show()
+        +-----------+-------+--------+----------+-------+--------+
+        |customer_id|   name|order_id|order_date|product|quantity|
+        +-----------+-------+--------+----------+-------+--------+
+        |          1|  Alice|     101|2024-01-10| laptop|       5|
+        |          1|  Alice|     101|2024-01-10|  mouse|      12|
+        |          1|  Alice|     102|2024-02-15|charger|      15|
+        |          1|  Alice|     102|2024-02-15|  phone|       2|
+        |          1|  Alice|     105|2024-03-20| tablet|       4|
+        |          2|    Bob|     103|2024-01-12| tablet|       8|
+        |          2|    Bob|     104|2024-03-05| laptop|       7|
+        |          3|Charlie|     106|2024-04-05|monitor|       1|
+        +-----------+-------+--------+----------+-------+--------+
+
+        Example 2 (use subquery): Finding the Two Most Recent Orders for Customer
+
+        >>> customers.alias("c").lateralJoin(
+        ...     orders.alias("o")
+        ...     .where(sf.col("o.customer_id") == sf.col("c.customer_id").outer())
+        ...     .select("order_id", "order_date")
+        ...     .orderBy(sf.col("order_date").desc())
+        ...     .limit(2),
+        ...     how="left"
+        ... ).orderBy("customer_id", "order_id").show()
+        +-----------+-------+--------+----------+
+        |customer_id|   name|order_id|order_date|
+        +-----------+-------+--------+----------+
+        |          1|  Alice|     102|2024-02-15|
+        |          1|  Alice|     105|2024-03-20|
+        |          2|    Bob|     103|2024-01-12|
+        |          2|    Bob|     104|2024-03-05|
+        |          3|Charlie|     106|2024-04-05|
+        |          4|  Diana|    NULL|      NULL|
+        +-----------+-------+--------+----------+
         """
         ...
 
@@ -2890,6 +3069,62 @@ class DataFrame:
         +---+-----+
         """
         ...
+
+    def _preapare_cols_for_sort(
+        self,
+        _to_col: Callable[[str], Column],
+        cols: Sequence[Union[int, str, Column, List[Union[int, str, Column]]]],
+        kwargs: Dict[str, Any],
+    ) -> Sequence[Column]:
+        from pyspark.errors import PySparkTypeError, PySparkValueError, PySparkIndexError
+
+        if not cols:
+            raise PySparkValueError(
+                errorClass="CANNOT_BE_EMPTY", messageParameters={"item": "cols"}
+            )
+
+        if len(cols) == 1 and isinstance(cols[0], list):
+            cols = cols[0]
+
+        _cols: List[Column] = []
+        for c in cols:
+            if isinstance(c, int) and not isinstance(c, bool):
+                # ordinal is 1-based
+                if c > 0:
+                    _cols.append(self[c - 1])
+                # negative ordinal means sort by desc
+                elif c < 0:
+                    _cols.append(self[-c - 1].desc())
+                else:
+                    raise PySparkIndexError(
+                        errorClass="ZERO_INDEX",
+                        messageParameters={},
+                    )
+            elif isinstance(c, Column):
+                _cols.append(c)
+            elif isinstance(c, str):
+                _cols.append(_to_col(c))
+            else:
+                raise PySparkTypeError(
+                    errorClass="NOT_COLUMN_OR_INT_OR_STR",
+                    messageParameters={
+                        "arg_name": "col",
+                        "arg_type": type(c).__name__,
+                    },
+                )
+
+        ascending = kwargs.get("ascending", True)
+        if isinstance(ascending, (bool, int)):
+            if not ascending:
+                _cols = [c.desc() for c in _cols]
+        elif isinstance(ascending, list):
+            _cols = [c if asc else c.desc() for asc, c in zip(ascending, _cols)]
+        else:
+            raise PySparkTypeError(
+                errorClass="NOT_COLUMN_OR_INT_OR_STR",
+                messageParameters={"arg_name": "ascending", "arg_type": type(ascending).__name__},
+            )
+        return _cols
 
     orderBy = sort
 
@@ -3351,7 +3586,7 @@ class DataFrame:
         ...
 
     @dispatch_df_method
-    def filter(self, condition: "ColumnOrName") -> "DataFrame":
+    def filter(self, condition: Union[Column, str]) -> "DataFrame":
         """Filters rows using the given condition.
 
         :func:`where` is an alias for :func:`filter`.
@@ -3802,7 +4037,7 @@ class DataFrame:
         groupingSets : sequence of sequence of columns or str
             Individual set of columns to group on.
         cols : :class:`Column` or str
-            Addional grouping columns specified by users.
+            Additional grouping columns specified by users.
             Those columns are shown as the output columns after aggregation.
 
         Returns
@@ -4531,6 +4766,10 @@ class DataFrame:
         Notes
         -----
         This is equivalent to `EXCEPT DISTINCT` in SQL.
+
+        See Also
+        --------
+        DataFrame.exceptAll : Similar to `subtract`, but preserves duplicates.
 
         Examples
         --------
@@ -5697,7 +5936,7 @@ class DataFrame:
 
     @dispatch_df_method
     def toDF(self, *cols: str) -> "DataFrame":
-        """Returns a new :class:`DataFrame` that with new specified column names
+        """Returns a new :class:`DataFrame` with new specified column names
 
         .. versionadded:: 1.6.0
 
@@ -5902,7 +6141,7 @@ class DataFrame:
         ...
 
     @dispatch_df_method
-    def where(self, condition: "ColumnOrName") -> "DataFrame":
+    def where(self, condition: Union[Column, str]) -> "DataFrame":
         """
         :func:`where` is an alias for :func:`filter`.
 
@@ -6371,6 +6610,197 @@ class DataFrame:
         """
         ...
 
+    def asTable(self) -> TableArg:
+        """
+        Converts the DataFrame into a :class:`table_arg.TableArg` object, which can
+        be used as a table argument in a TVF(Table-Valued Function) including UDTF
+        (User-Defined Table Function).
+
+        After obtaining a TableArg from a DataFrame using this method, you can specify partitioning
+        and ordering for the table argument by calling methods such as `partitionBy`, `orderBy`, and
+        `withSinglePartition` on the `TableArg` instance.
+        - partitionBy: Partitions the data based on the specified columns. This method cannot
+        be called after withSinglePartition() has been called.
+        - orderBy: Orders the data within partitions based on the specified columns.
+        - withSinglePartition: Indicates that the data should be treated as a single partition.
+        This method cannot be called after partitionBy() has been called.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`table_arg.TableArg`
+            A `TableArg` object representing a table argument.
+        """
+        ...
+
+    def scalar(self) -> Column:
+        """
+        Return a `Column` object for a SCALAR Subquery containing exactly one row and one column.
+
+        The `scalar()` method is useful for extracting a `Column` object that represents a scalar
+        value from a DataFrame, especially when the DataFrame results from an aggregation or
+        single-value computation. This returned `Column` can then be used directly in `select`
+        clauses or as predicates in filters on the outer DataFrame, enabling dynamic data filtering
+        and calculations based on scalar values.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`Column`
+            A `Column` object representing a SCALAR subquery.
+
+        Examples
+        --------
+        Setup a sample DataFrame.
+
+        >>> data = [
+        ...     (1, "Alice", 45000, 101), (2, "Bob", 54000, 101), (3, "Charlie", 29000, 102),
+        ...     (4, "David", 61000, 102), (5, "Eve", 48000, 101),
+        ... ]
+        >>> employees = spark.createDataFrame(data, ["id", "name", "salary", "department_id"])
+
+        Example 1 (non-correlated): Filter for employees with salary greater than the average
+        salary.
+
+        >>> from pyspark.sql import functions as sf
+        >>> employees.where(
+        ...     sf.col("salary") > employees.select(sf.avg("salary")).scalar()
+        ... ).select("name", "salary", "department_id").orderBy("name").show()
+        +-----+------+-------------+
+        | name|salary|department_id|
+        +-----+------+-------------+
+        |  Bob| 54000|          101|
+        |David| 61000|          102|
+        |  Eve| 48000|          101|
+        +-----+------+-------------+
+
+        Example 2 (correlated): Filter for employees with salary greater than the average salary
+        in their department.
+
+        >>> from pyspark.sql import functions as sf
+        >>> employees.alias("e1").where(
+        ...     sf.col("salary")
+        ...     > employees.alias("e2").where(
+        ...         sf.col("e2.department_id") == sf.col("e1.department_id").outer()
+        ...     ).select(sf.avg("salary")).scalar()
+        ... ).select("name", "salary", "department_id").orderBy("name").show()
+        +-----+------+-------------+
+        | name|salary|department_id|
+        +-----+------+-------------+
+        |  Bob| 54000|          101|
+        |David| 61000|          102|
+        +-----+------+-------------+
+
+        Example 3 (in select): Select the name, salary, and the proportion of the salary in the
+        department.
+
+        >>> from pyspark.sql import functions as sf
+        >>> employees.alias("e1").select(
+        ...     "name", "salary", "department_id",
+        ...     sf.format_number(
+        ...         sf.lit(100) * sf.col("salary") /
+        ...             employees.alias("e2").where(
+        ...                 sf.col("e2.department_id") == sf.col("e1.department_id").outer()
+        ...             ).select(sf.sum("salary")).scalar().alias("avg_salary"),
+        ...         1
+        ...     ).alias("salary_proportion_in_department")
+        ... ).orderBy("name").show()
+        +-------+------+-------------+-------------------------------+
+        |   name|salary|department_id|salary_proportion_in_department|
+        +-------+------+-------------+-------------------------------+
+        |  Alice| 45000|          101|                           30.6|
+        |    Bob| 54000|          101|                           36.7|
+        |Charlie| 29000|          102|                           32.2|
+        |  David| 61000|          102|                           67.8|
+        |    Eve| 48000|          101|                           32.7|
+        +-------+------+-------------+-------------------------------+
+        """
+        ...
+
+    def exists(self) -> Column:
+        """
+        Return a `Column` object for an EXISTS Subquery.
+
+        The `exists` method provides a way to create a boolean column that checks for the presence
+        of related records in a subquery. When applied within a `DataFrame`, this method allows you
+        to filter rows based on whether matching records exist in the related dataset. The resulting
+        `Column` object can be used directly in filtering conditions or as a computed column.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`Column`
+            A `Column` object representing an EXISTS subquery
+
+        Examples
+        --------
+        Setup sample data for customers and orders.
+
+        >>> data_customers = [
+        ...     (101, "Alice", "USA"), (102, "Bob", "Canada"), (103, "Charlie", "USA"),
+        ...     (104, "David", "Australia")
+        ... ]
+        >>> data_orders = [
+        ...     (1, 101, "2023-01-15", 250), (2, 102, "2023-01-20", 300),
+        ...     (3, 103, "2023-01-25", 400), (4, 101, "2023-02-05", 150)
+        ... ]
+        >>> customers = spark.createDataFrame(
+        ...     data_customers, ["customer_id", "customer_name", "country"])
+        >>> orders = spark.createDataFrame(
+        ...     data_orders, ["order_id", "customer_id", "order_date", "total_amount"])
+
+        Example 1: Filter for customers who have placed at least one order.
+
+        >>> from pyspark.sql import functions as sf
+        >>> customers.alias("c").where(
+        ...     orders.alias("o").where(
+        ...         sf.col("o.customer_id") == sf.col("c.customer_id").outer()
+        ...     ).exists()
+        ... ).orderBy("customer_id").show()
+        +-----------+-------------+-------+
+        |customer_id|customer_name|country|
+        +-----------+-------------+-------+
+        |        101|        Alice|    USA|
+        |        102|          Bob| Canada|
+        |        103|      Charlie|    USA|
+        +-----------+-------------+-------+
+
+        Example 2: Filter for customers who have never placed an order.
+
+        >>> from pyspark.sql import functions as sf
+        >>> customers.alias("c").where(
+        ...     ~orders.alias("o").where(
+        ...         sf.col("o.customer_id") == sf.col("c.customer_id").outer()
+        ...     ).exists()
+        ... ).orderBy("customer_id").show()
+        +-----------+-------------+---------+
+        |customer_id|customer_name|  country|
+        +-----------+-------------+---------+
+        |        104|        David|Australia|
+        +-----------+-------------+---------+
+
+        Example 3: Find Orders from Customers in the USA.
+
+        >>> from pyspark.sql import functions as sf
+        >>> orders.alias("o").where(
+        ...     customers.alias("c").where(
+        ...         (sf.col("c.customer_id") == sf.col("o.customer_id").outer())
+        ...         & (sf.col("country") == "USA")
+        ...     ).exists()
+        ... ).orderBy("order_id").show()
+        +--------+-----------+----------+------------+
+        |order_id|customer_id|order_date|total_amount|
+        +--------+-----------+----------+------------+
+        |       1|        101|2023-01-15|         250|
+        |       3|        103|2023-01-25|         400|
+        |       4|        101|2023-02-05|         150|
+        +--------+-----------+----------+------------+
+        """
+        ...
+
     @property
     def executionInfo(self) -> Optional["ExecutionInfo"]:
         """
@@ -6399,17 +6829,20 @@ class DataFrame:
     @property
     def plot(self) -> "PySparkPlotAccessor":
         """
-        Returns a :class:`PySparkPlotAccessor` for plotting functions.
+        Returns a :class:`plot.core.PySparkPlotAccessor` for plotting functions.
 
         .. versionadded:: 4.0.0
 
         Returns
         -------
-        :class:`PySparkPlotAccessor`
+        :class:`plot.core.PySparkPlotAccessor`
 
         Notes
         -----
         This API is experimental.
+        It provides two ways to create plots:
+        1. Chaining style (e.g., `df.plot.line(...)`).
+        2. Explicit style (e.g., `df.plot(kind="line", ...)`).
 
         Examples
         --------
@@ -6419,6 +6852,7 @@ class DataFrame:
         >>> type(df.plot)
         <class 'pyspark.sql.plot.core.PySparkPlotAccessor'>
         >>> df.plot.line(x="category", y=["int_val", "float_val"])  # doctest: +SKIP
+        >>> df.plot(kind="line", x="category", y=["int_val", "float_val"])  # doctest: +SKIP
         """
         ...
 
